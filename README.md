@@ -27,7 +27,7 @@ chmod +x install.sh
 ./install.sh
 ```
 
-Then open Claude Code in any project and type `/meet` to get started.
+Then open Claude Code in any project and type `/setup` to get started.
 
 ## Workflow
 
