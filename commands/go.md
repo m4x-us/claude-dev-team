@@ -8,25 +8,33 @@ When `/go` is typed, you find your pending brief in `.autocode/queue/`, claim it
 
 ## MODULE_CONTEXT (s1701 module sessions only)
 
-**How MODULE is determined:**
-Check if `.autocode/modules/.active-module` exists. If it does: read its content (one line,
-trimmed) as MODULE. If not: MODULE is unset — use global queue path.
+**How MODULE is determined — check in this order:**
 
-(Note: /go always runs in child windows — fresh Claude sessions with no prior `/scope` banner.
-The `.active-module` file written by scope.md is the ONLY mechanism available here. If the
-parent session ran `/scope [module]`, scope.md wrote that file automatically.)
+**1. Worker pool lookup (primary — for child windows with a known name):**
+If `$ARGUMENTS` (AGENT_HINT) is non-empty AND `.autocode/modules/.worker-pool.json` exists:
+  Run: `python3 ~/.claude/scripts/worker-pool.py lookup [AGENT_HINT_lowercase]`
+  - If output is non-empty and ≠ "unowned": MODULE = output, SOURCE = "worker pool — [AGENT_HINT_lowercase]"
+  - If worker-pool.py not found, or output = "unowned":
+    Print note in output: "Pool lookup unavailable or name unowned — falling through to .active-module"
+    Proceed to step 2.
+
+**2. Active-module file (fallback — for /go with no argument, or when pool unavailable):**
+If `.autocode/modules/.active-module` exists:
+  MODULE = file contents (one line, trimmed), SOURCE = ".active-module file"
+
+**3. Unset:** MODULE is not set — use global `.autocode/queue/` path throughout.
+
+**When MODULE is determined, print at the TOP of output (before any other text):**
+`╔══ Module scope: [MODULE] (source: [SOURCE]) ══╗`
+Examples:
+  Pool case:  `╔══ Module scope: email (source: worker pool — adam) ══╗`
+  File case:  `╔══ Module scope: email (source: .active-module file) ══╗`
+SOURCE string is conditional — use whichever source actually resolved MODULE.
+If MODULE is unset: omit this header entirely.
 
 If MODULE is set:
 - Replace `.autocode/queue/` with `.autocode/modules/[MODULE]/queue/` in ALL queue path
   references in this file (Step 1, Step 2, Step 5)
-
-**When MODULE is determined, print at the TOP of this command's output:**
-```
-╔══ Module scope: [MODULE] (source: .active-module file) ══╗
-```
-This line must appear before any other output. If MODULE is not set, omit it.
-
-If MODULE is not set: use `.autocode/queue/` throughout.
 
 ---
 

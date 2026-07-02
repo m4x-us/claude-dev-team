@@ -18,6 +18,7 @@ cp "$COMMANDS_SRC"/*.md "$COMMANDS_DEST/"
 
 echo "Installing scripts → $SCRIPTS_DEST"
 cp "$SCRIPTS_SRC"/tasks-summary.py "$SCRIPTS_DEST/"
+cp "$SCRIPTS_SRC"/worker-pool.py "$SCRIPTS_DEST/"
 
 echo "Installing autocode → $AUTOCODE_DEST"
 cp "$AUTOCODE_SRC"/philosophy.md "$AUTOCODE_DEST/"

@@ -280,6 +280,27 @@ After printing the plan, proceed directly to Step W.3. No approval needed.
 Step W.3 — Generate briefs and queue files
 ─────────────────────────────────────────────────────────
 
+── WORKER_NAMES ──
+If MODULE is set:
+  Read `.autocode/modules/[MODULE]/.workers` line by line → WORKER_NAMES (lowercase list).
+  If file missing or empty: WORKER_NAMES = ["adam","barry","charles","derek"]
+If MODULE is not set:
+  WORKER_NAMES = ["adam","barry","charles","derek"]
+
+STREAM_WORKER_MAP:
+  Stream A → WORKER_NAMES[0].capitalize()
+  Stream B → WORKER_NAMES[1].capitalize()
+  Stream C → WORKER_NAMES[2].capitalize()
+  Stream D → WORKER_NAMES[3].capitalize()
+(Cap active streams at min(len(WORKER_NAMES), 4). Stream letters stay A/B/C/D.)
+
+If len(WORKER_NAMES) < number of natural clusters from W.1, print before the wave plan:
+```
+Note: [N] natural task clusters reduced to [len(WORKER_NAMES)] streams — module '[MODULE]'
+has only [len(WORKER_NAMES)] workers in pool. To restore full parallelism: run
+`/scope clear`, then `/scope [MODULE] [N]` to claim more workers.
+```
+
 For each STREAM W[WAVE_NUM][X]:
 
 Determine MEMORY_CONTENT:
@@ -295,7 +316,7 @@ Create briefs directory if it doesn't exist:
 - If MODULE is set: `mkdir -p .autocode/modules/[MODULE]/briefs/`
 - Otherwise: `mkdir -p .autocode/briefs/`
 
-Name mapping for streams: A→Adam, B→Barry, C→Charles, D→Derek.
+Name mapping for streams: A→WORKER_NAMES[0], B→WORKER_NAMES[1], C→WORKER_NAMES[2], D→WORKER_NAMES[3] (resolved via STREAM_WORKER_MAP above).
 
 Write the brief file for each stream (path depends on MODULE — see MODULE_CONTEXT above):
 
@@ -379,7 +400,7 @@ Create queue directory if it does not exist:
 - If MODULE is set: `mkdir -p .autocode/modules/[MODULE]/queue/`
 - Otherwise: `mkdir -p .autocode/queue/`
 
-For each STREAM W[WAVE_NUM][X], write the queue file at the appropriate path (using A→adam, B→barry, C→charles, D→derek — see MODULE_CONTEXT for path):
+For each STREAM W[WAVE_NUM][X], write the queue file at the appropriate path (using WORKER_NAMES[0], WORKER_NAMES[1], etc. — lowercase — see MODULE_CONTEXT for path):
 
 ```markdown
 ---
@@ -395,8 +416,8 @@ wave: {WAVE_NUM}
 Print:
 ```
 Queue files written:
-  .autocode/queue/adam.md  — status: pending
-  .autocode/queue/barry.md — status: pending
+  .autocode/queue/[WORKER_NAMES[0]].md  — status: pending
+  .autocode/queue/[WORKER_NAMES[1]].md  — status: pending
   [etc. for each active stream]
 ```
 
@@ -417,7 +438,7 @@ For each STREAM W[WAVE_NUM][X]:
 
 Sub-step W.4b — Print terminal setup guide:
 
-Name mapping: A→Adam, B→Barry, C→Charles, D→Derek.
+Worker names for this session (from STREAM_WORKER_MAP):
 
 Print:
 ```
@@ -431,16 +452,20 @@ In each window, type:
   /go
 
 Each window auto-claims the next pending queue slot and starts.
-(Or type /go adam, /go barry, etc. to claim a specific slot.)
+(Or type /go [WORKER_NAMES[0]], /go [WORKER_NAMES[1]], etc. to claim a specific slot.
+Worker names for this wave: Stream A → /go [WORKER_NAMES[0]]  Stream B → /go [WORKER_NAMES[1]]  ...)
 
 Each Claude will end every response with their name so you
 always know which window you're in.
 
 Come back here when windows finish. Type:
   done          — all streams complete
-  done adam     — Adam's stream done (others still running)
-  done adam barry — multiple streams done
-  stuck adam    — Adam hit a problem (describe it after)
+  done [WORKER_NAMES[0]]                    — that stream done (others still running)
+  done [WORKER_NAMES[0]] [WORKER_NAMES[1]]  — multiple streams done
+  stuck [WORKER_NAMES[0]]                   — that stream hit a problem (describe it after)
+
+After receiving `done [names]`, cross-check each name against WORKER_NAMES.
+If a name is not in WORKER_NAMES, print: "Unknown worker name: [x]. Expected one of: [WORKER_NAMES]. Did you mean [closest]?" Never silently ignore unrecognized names.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
@@ -508,9 +533,9 @@ Sub-step W.4d — Read completion summaries:
 For each completed stream W[WAVE_NUM][X], read `.autocode/stream-W[WAVE_NUM][X]/completion.md`. Print:
 ```
 Wave [WAVE_NUM] results:
-  Adam   (W[N]A) — [full content of completion.md]
-  Barry  (W[N]B) — [full content of completion.md]
-  [Charles / Derek if present]
+  [STREAM_WORKER_MAP[A]]  (W[N]A) — [full content of completion.md]
+  [STREAM_WORKER_MAP[B]]  (W[N]B) — [full content of completion.md]
+  [STREAM_WORKER_MAP[C/D] if present]
 ```
 
 
@@ -541,7 +566,7 @@ For each stream W[WAVE_NUM][X] just consolidated:
   For each file that stream owned (its FILE_SET from W.1):
     STREAM_HISTORY[file] = {
       wave: WAVE_NUM,
-      stream_name: [Adam/Barry/Charles/Derek],
+      stream_name: STREAM_WORKER_MAP[X],  ← e.g. "Adam", "Eric", whatever was assigned this wave
       task_titles: [list of task titles closed this wave that touched this file],
       summary: [one-line summary of what changed, extracted from completion.md]
     }
