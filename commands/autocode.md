@@ -6,6 +6,37 @@ Execute every step below without stopping, without asking for approval. Do not p
 
 ---
 
+## MODULE_CONTEXT (s1701 module sessions only)
+
+**How MODULE is determined (check in this order):**
+1. If a `/scope [module]` banner was printed in this session's conversation context: use that module name.
+2. Else if `.autocode/modules/.active-module` exists: read its content (one line, trimmed) as MODULE.
+3. Else: MODULE is unset — use global paths throughout.
+
+**When MODULE is determined, print at the TOP of this command's output:**
+```
+╔══ Module scope: [MODULE] (source: scope banner / .active-module file) ══╗
+```
+
+If `MODULE` is set:
+- Replace `.autocode/tasks.md`             with `.autocode/modules/[MODULE]/tasks.md`
+- Replace `.autocode/agents/cto.md`        with `.autocode/modules/[MODULE]/cto.md`
+- Replace `.autocode/agents/security.md`   with `.autocode/modules/[MODULE]/security.md`
+- Replace `.autocode/agents/architect.md`  with `.autocode/modules/[MODULE]/architect.md`
+- Replace `.autocode/agents/qa.md`         with `.autocode/modules/[MODULE]/qa.md`
+- Replace `.autocode/debt.md`              with `.autocode/modules/[MODULE]/debt.md`
+- Replace `.autocode/carry-forward-log.md` with `.autocode/modules/[MODULE]/carry-forward-log.md`
+- Create any of these files with standard headers if they do not exist
+- `.autocode/patterns.md` is NOT replaced — stays global
+
+**When both MODULE and STREAM_ID are set simultaneously:**
+MODULE scopes to the module directory first. STREAM_ID further scopes within it.
+Combined path: `.autocode/modules/[MODULE]/stream-[STREAM_ID]/tasks.md`
+
+If `MODULE` is not set: use the standard global paths throughout this file.
+
+---
+
 ## INVOCATION MODES
 
 **Standalone:** `/autocode [description]` — full plan + build. Max runs /audit separately afterward.

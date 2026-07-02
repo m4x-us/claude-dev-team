@@ -8,6 +8,57 @@ This command brings the development team up to speed: reads all context, examine
 
 ---
 
+## MODULE_CONTEXT (s1701 module sessions only)
+
+**How MODULE is determined (check in this order):**
+1. If a `/scope [module]` banner was printed in this session's conversation context: use that module name.
+2. Else if `.autocode/modules/.active-module` exists: read its content (one line, trimmed) as MODULE.
+3. Else: MODULE is unset — use global paths throughout.
+
+**When MODULE is determined, print at the TOP of this command's output:**
+```
+╔══ Module scope: [MODULE] (source: scope banner / .active-module file) ══╗
+```
+
+If `MODULE` is set, look up the module's paths from the s1701 module registry and set `MODULE_PATHS`
+(e.g., for email: `apps/web/src/app/dashboard/inbox apps/web/src/components/email packages/ordinatio-email`).
+
+If `MODULE` is set:
+- Replace `mkdir -p .autocode/agents`        with `mkdir -p .autocode/modules/[MODULE]`
+- Replace `.autocode/tasks.md`               with `.autocode/modules/[MODULE]/tasks.md`
+- Replace `.autocode/agents/cto.md`          with `.autocode/modules/[MODULE]/cto.md`
+- Replace `.autocode/agents/security.md`     with `.autocode/modules/[MODULE]/security.md`
+- Replace `.autocode/agents/architect.md`    with `.autocode/modules/[MODULE]/architect.md`
+- Replace `.autocode/agents/qa.md`           with `.autocode/modules/[MODULE]/qa.md`
+- Replace `.autocode/agents/docs.md`         with `.autocode/modules/[MODULE]/docs.md`
+- Replace `.autocode/debt.md`                with `.autocode/modules/[MODULE]/debt.md`
+- Replace `.autocode/carry-forward-log.md`   with `.autocode/modules/[MODULE]/carry-forward-log.md`
+- Create any of these files with standard headers if they do not exist
+- Keep GLOBAL (do NOT replace): `.autocode/audit-checklist.md`, `.autocode/project-profile.md`,
+  `.autocode/mutation-packages.md`, `.autocode/patterns.md` — these apply to the whole project
+- In PHASE 1 examination agents: inject MODULE_PATHS search scope restriction (see below)
+- In PHASE 6 handoff briefing: print "Module memory written to: .autocode/modules/[MODULE]/"
+
+**MODULE_PATHS search scope injection (PHASE 1 agents only):**
+When MODULE is set, add this block at the TOP of EACH examination agent prompt, before any other content:
+
+```
+MODULE SCOPE — restrict ALL search commands to these paths only:
+[MODULE_PATHS — e.g. "apps/web/src/app/dashboard/inbox packages/ordinatio-email"]
+
+Replace every search command that uses `. ` (repo root) with MODULE_PATHS:
+  `grep -rn 'pattern' .` → `grep -rn 'pattern' [MODULE_PATHS]`
+  `find . -name '*.ts'` → `find [MODULE_PATHS] -type f \( -name "*.ts" -o -name "*.tsx" \)`
+Do NOT search outside these paths. If a finding is in a file outside MODULE_PATHS, discard it.
+```
+
+When both MODULE and STREAM_ID are set simultaneously:
+Combined path: `.autocode/modules/[MODULE]/stream-[STREAM_ID]/tasks.md`
+
+If `MODULE` is not set: use the standard global paths throughout this file.
+
+---
+
 ## PHASE 0: LOAD ALL CONTEXT
 
 Run in the orchestrating session:
@@ -15,6 +66,7 @@ Run in the orchestrating session:
 ```
 mkdir -p .autocode/agents
 ```
+(Or `mkdir -p .autocode/modules/[MODULE]` if MODULE is set — see MODULE_CONTEXT above.)
 
 Read in this order (all mandatory):
 

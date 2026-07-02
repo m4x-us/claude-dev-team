@@ -6,6 +6,37 @@ This command scores the code on two independent lenses (Architecture + Vibes), s
 
 ---
 
+## MODULE_CONTEXT (s1701 module sessions only)
+
+**How MODULE is determined (check in this order):**
+1. If a `/scope [module]` banner was printed in this session's conversation context: use that module name.
+2. Else if `.autocode/modules/.active-module` exists: read its content (one line, trimmed) as MODULE.
+3. Else: MODULE is unset — use global paths throughout.
+
+**When MODULE is determined, print at the TOP of this command's output:**
+```
+╔══ Module scope: [MODULE] (source: scope banner / .active-module file) ══╗
+```
+
+If `MODULE` is set:
+- Replace `.autocode/tasks.md`             with `.autocode/modules/[MODULE]/tasks.md`
+- Replace `.autocode/agents/cto.md`        with `.autocode/modules/[MODULE]/cto.md`
+- Replace `.autocode/agents/security.md`   with `.autocode/modules/[MODULE]/security.md`
+- Replace `.autocode/agents/architect.md`  with `.autocode/modules/[MODULE]/architect.md`
+- Replace `.autocode/agents/qa.md`         with `.autocode/modules/[MODULE]/qa.md`
+- Replace `.autocode/debt.md`              with `.autocode/modules/[MODULE]/debt.md`
+- Replace `.autocode/carry-forward-log.md` with `.autocode/modules/[MODULE]/carry-forward-log.md`
+- Create any of these files with standard headers if they do not exist
+- `.autocode/patterns.md` is NOT replaced — stays global
+
+**When both MODULE and STREAM_ID are set simultaneously:**
+MODULE scopes to the module directory first. STREAM_ID further scopes within it.
+Combined path: `.autocode/modules/[MODULE]/stream-[STREAM_ID]/tasks.md`
+
+If `MODULE` is not set: use the standard global paths throughout this file.
+
+---
+
 ## PHASE 0: SETUP
 
 Run in the orchestrating session:
@@ -36,6 +67,9 @@ Read `.autocode/agents/architect.md` → `MEMORY_ARCHITECT` (or "None").
 Read `.autocode/agents/qa.md` → `MEMORY_QA` (or "None").
 Read `.autocode/agents/cto.md` → `CTO_MEMORY` (or "None").
 Extract known blind spots per agent from CTO_MEMORY as `CTO_INTELLIGENCE`.
+
+If MODULE is set: read `.autocode/modules/[MODULE]/standards.md` →
+`MODULE_STANDARDS_CONTEXT` (or "None — no standards.md for this module yet").
 
 Read `.autocode/project-profile.md` → `PROJECT_PROFILE` (or "Unknown — run /meet to detect stack.").
 
@@ -141,6 +175,15 @@ Do not skim. Do not summarize sections. Read every line.
 
 PROJECT PHILOSOPHY — the standard this codebase holds itself to:
 [PROJECT_PHILOSOPHY]
+
+MODULE QUALITY STANDARDS — module-specific criteria (omit this block entirely if MODULE_STANDARDS_CONTEXT = "None"):
+[MODULE_STANDARDS_CONTEXT]
+
+If MODULE QUALITY STANDARDS is present, apply these deduction floors:
+- "Module-Specific Quality Criteria" violation: minimum -5 pts (severity 5)
+- "Known Fragile Areas" touched without required protection: minimum -10 pts (severity 7)
+- "Seam Contract" broken: minimum -15 pts (severity 8)
+These are not optional deductions. A module standard is a real architectural constraint.
 
 PROJECT PROFILE — the stack and deployment model:
 [PROJECT_PROFILE]
@@ -536,6 +579,9 @@ Current score: [COMBINED_SCORE]/100. Need: 95/100. Gap: [95 - COMBINED_SCORE] po
 
 SLOW-CODING TOYOTA SYSTEM PHILOSOPHY — Every fix must comply with this:
 [PROJECT_PHILOSOPHY]
+
+MODULE QUALITY STANDARDS — fixes must not violate these constraints (omit if MODULE_STANDARDS_CONTEXT = "None"):
+[MODULE_STANDARDS_CONTEXT]
 
 KNOWN DRIFTS — These categories have recurred 3+ times in previous runs on this codebase. Each fix must include a specific countermeasure — not a general acknowledgment:
 [KNOWN_DRIFTS]

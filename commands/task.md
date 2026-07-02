@@ -7,10 +7,43 @@ Execute every phase without pausing.
 
 ---
 
+## MODULE_CONTEXT (s1701 module sessions only)
+
+**How MODULE is determined (check in this order):**
+1. If a `/scope [module]` banner was printed in this session's conversation context: use that module name.
+2. Else if `.autocode/modules/.active-module` exists: read its content (one line, trimmed) as MODULE.
+3. Else: MODULE is unset — use global paths throughout.
+
+**When MODULE is determined, print at the TOP of this command's output:**
+```
+╔══ Module scope: [MODULE] (source: scope banner / .active-module file) ══╗
+```
+
+If `MODULE` is set:
+- Replace `.autocode/tasks.md`             with `.autocode/modules/[MODULE]/tasks.md`
+- Replace `.autocode/agents/cto.md`        with `.autocode/modules/[MODULE]/cto.md`
+- Replace `.autocode/agents/security.md`   with `.autocode/modules/[MODULE]/security.md`
+- Replace `.autocode/agents/architect.md`  with `.autocode/modules/[MODULE]/architect.md`
+- Replace `.autocode/agents/qa.md`         with `.autocode/modules/[MODULE]/qa.md`
+- Replace `.autocode/debt.md`              with `.autocode/modules/[MODULE]/debt.md`
+- Replace `.autocode/carry-forward-log.md` with `.autocode/modules/[MODULE]/carry-forward-log.md`
+- Create any of these files with standard headers if they do not exist
+- `.autocode/patterns.md` is NOT replaced — stays global
+
+**When both MODULE and STREAM_ID are set simultaneously:**
+MODULE scopes to the module directory first. STREAM_ID further scopes within it.
+Combined path: `.autocode/modules/[MODULE]/stream-[STREAM_ID]/tasks.md`
+(not `.autocode/stream-[STREAM_ID]/tasks.md` — that path ignores MODULE)
+
+If `MODULE` is not set: use the standard global paths throughout this file.
+
+---
+
 ## STREAM_ID check (parallel /advance sessions only)
 
 If `STREAM_ID` is set in the current context (set by a parent CTO via `/advance` brief):
 - Replace `.autocode/tasks.md` with `.autocode/stream-[STREAM_ID]/tasks.md` for all reads/writes
+  (or `.autocode/modules/[MODULE]/stream-[STREAM_ID]/tasks.md` if MODULE is also set)
 - Replace `.autocode/debt.md` with `.autocode/stream-[STREAM_ID]/debt.md` for all reads/writes
 - Replace `.autocode/carry-forward-log.md` with `.autocode/stream-[STREAM_ID]/carry-forward-log.md` for all reads/writes
 - Create these files with their standard headers if they do not exist
@@ -694,6 +727,52 @@ If WORLDCLASS_RESULT.verdict = "MAX_CYCLES":
 ---
 
 ## PHASE 4: COMPLETE
+
+**Step 4.0b — Standards Elevation Check (MODULE sessions only):**
+
+Skip this step entirely if MODULE is not set.
+
+1. Read `.autocode/modules/[MODULE]/cto.md` Task Cycle Log section.
+   Extract all structured finding lines (format: `[Fid|sev:N|category|file:fn:line|description|annotation]`).
+   For each finding line, identify which task (`### Task #[N]`) it belongs to by scanning backward
+   in the file for the nearest `### Task #` header above it.
+
+2. Build a map: key = `(category, description[:50].lower())` → set of Task #s that had this finding.
+
+3. Read current `.autocode/modules/[MODULE]/standards.md` "Module-Specific Quality Criteria" section.
+   Extract existing criterion text. Build existing_keys = set of first 50 chars of each criterion, lowercased.
+
+4. Find NEW elevation candidates:
+   candidate = key that appears in 2+ DIFFERENT Task #s AND NOT in existing_keys.
+
+5. If any NEW candidates found, print:
+   ```
+   ──────────────────────────────────────────────────────
+     STANDARDS ELEVATION — [N] pattern(s) repeated in [MODULE]
+   ──────────────────────────────────────────────────────
+     Found in 2+ tasks. Add to [MODULE] standards.md?
+     (Future audits will enforce these as CUSTOM_CHECKLIST items.)
+
+     [1] [category]: [description] — Tasks #N, #M (severity N)
+     [2] [category]: [description] — Tasks #N, #M (severity N)
+
+     Elevate?  [numbers, comma-separated] / no
+   ──────────────────────────────────────────────────────
+   ```
+
+   Wait for input. If numbers provided: for each selected:
+   ```bash
+   python3 scripts/update-standards.py \
+     --criteria '[{"text":"[description]","section":"quality","source_tasks":"Task #N, #M","severity":N}]' \
+     --standards-file .autocode/modules/[MODULE]/standards.md
+   ```
+   Paste script output. If exit 1: stop and fix before proceeding.
+
+   If no: proceed silently.
+
+6. If no NEW candidates: skip silently (no output).
+
+---
 
 **Step 4.0 — Write agent memories (using FINAL_AUDIT_RESULT from Phase 2.2):**
 

@@ -6,6 +6,42 @@ This command analyzes the task list, groups open tasks into parallel streams, pr
 
 ---
 
+## MODULE_CONTEXT (s1701 module sessions only)
+
+**How MODULE is determined (check in this order):**
+1. If a `/scope [module]` banner was printed in this session's conversation context: use that module name.
+2. Else if `.autocode/modules/.active-module` exists: read its content (one line, trimmed) as MODULE.
+3. Else: MODULE is unset — use global paths throughout.
+
+**When MODULE is determined, print at the TOP of this command's output:**
+```
+╔══ Module scope: [MODULE] (source: scope banner / .active-module file) ══╗
+```
+
+If `MODULE` is set, replace ALL path references:
+- Replace `.autocode/tasks.md`                          with `.autocode/modules/[MODULE]/tasks.md`
+- Replace `.autocode/agents/cto.md`                     with `.autocode/modules/[MODULE]/cto.md`
+- Replace `.autocode/agents/security.md`                with `.autocode/modules/[MODULE]/security.md`
+- Replace `.autocode/agents/architect.md`               with `.autocode/modules/[MODULE]/architect.md`
+- Replace `.autocode/agents/qa.md`                      with `.autocode/modules/[MODULE]/qa.md`
+- Replace `.autocode/debt.md`                           with `.autocode/modules/[MODULE]/debt.md`
+- Replace `.autocode/carry-forward-log.md`              with `.autocode/modules/[MODULE]/carry-forward-log.md`
+- Replace `.autocode/briefs/stream-[ID]-start.md`       with `.autocode/modules/[MODULE]/briefs/stream-[ID]-start.md`
+- Replace `.autocode/queue/{name}.md`                   with `.autocode/modules/[MODULE]/queue/{name}.md`
+- Replace `.autocode/stream-[ID]/tasks.md`              with `.autocode/modules/[MODULE]/stream-[ID]/tasks.md`
+- Replace `.autocode/stream-[ID]/completion.md`         with `.autocode/modules/[MODULE]/stream-[ID]/completion.md`
+- Replace `.autocode/stream-[ID]/debt.md`               with `.autocode/modules/[MODULE]/stream-[ID]/debt.md`
+- Create any of these files/directories with standard headers if they do not exist
+- `.autocode/patterns.md` is NOT replaced — stays global
+
+**When both MODULE and STREAM_ID are set simultaneously:**
+MODULE scopes to module directory first. STREAM_ID scopes within it.
+Combined path: `.autocode/modules/[MODULE]/stream-[STREAM_ID]/tasks.md`
+
+If `MODULE` is not set: use the standard global paths throughout this file.
+
+---
+
 ## Initialize
 
 Read `.autocode/tasks.md`. Find the batch section marked `[CURRENT SPRINT]`.
@@ -255,11 +291,13 @@ Determine MEMORY_CONTENT:
     "## Security Agent Memory (first 100 lines)" / "## Architect Agent Memory (first 100 lines)" / etc.
     Never exceed 200 lines total across all memory files for one stream.
 
-Create `.autocode/briefs/` directory if it doesn't exist.
+Create briefs directory if it doesn't exist:
+- If MODULE is set: `mkdir -p .autocode/modules/[MODULE]/briefs/`
+- Otherwise: `mkdir -p .autocode/briefs/`
 
 Name mapping for streams: A→Adam, B→Barry, C→Charles, D→Derek.
 
-Write `.autocode/briefs/stream-W[WAVE_NUM][X]-start.md` for each stream:
+Write the brief file for each stream (path depends on MODULE — see MODULE_CONTEXT above):
 
 ```markdown
 # [NAME] — Stream W[WAVE_NUM][X] — Wave [WAVE_NUM] — [today's date]
@@ -267,6 +305,16 @@ Write `.autocode/briefs/stream-W[WAVE_NUM][X]-start.md` for each stream:
 IDENTITY RULE — MANDATORY: End EVERY response with exactly this line, no exceptions
 (including short replies, confirmations, and one-word answers):
 — [NAME] | W[WAVE_NUM][X] | [space-separated task numbers e.g. #003 #007]
+
+[If MODULE is set, include the following block. If MODULE is not set, omit it entirely:]
+## Active Module
+MODULE: [MODULE]
+
+This window is scoped to the [MODULE] module. The file `.autocode/modules/.active-module`
+exists and contains "[MODULE]" — all suite commands (`/task`, `/audit`, `/tasks`, etc.)
+read this automatically via MODULE_CONTEXT and route all writes to `.autocode/modules/[MODULE]/`.
+You do not need to do anything special; this is informational so you know which module you're in.
+[End of conditional MODULE block]
 
 You are [NAME], a CTO working on a specific set of tasks in parallel with other windows.
 Work exclusively on the files listed under "Files You Own". Do not touch anything else.
@@ -325,11 +373,13 @@ Then tell Max in this window: "[NAME] is done." (or describe what's incomplete).
 — [NAME] | W[WAVE_NUM][X] | [task numbers]
 ```
 
-After writing all `.autocode/briefs/stream-W[WAVE_NUM][X]-start.md` files:
+After writing all brief files:
 
-Create `.autocode/queue/` directory if it does not exist.
+Create queue directory if it does not exist:
+- If MODULE is set: `mkdir -p .autocode/modules/[MODULE]/queue/`
+- Otherwise: `mkdir -p .autocode/queue/`
 
-For each STREAM W[WAVE_NUM][X], write `.autocode/queue/{name}.md` (using A→adam, B→barry, C→charles, D→derek):
+For each STREAM W[WAVE_NUM][X], write the queue file at the appropriate path (using A→adam, B→barry, C→charles, D→derek — see MODULE_CONTEXT for path):
 
 ```markdown
 ---

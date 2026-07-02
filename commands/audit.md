@@ -6,6 +6,37 @@ Review the full scope of everything built for this task — not just the most re
 
 ---
 
+## MODULE_CONTEXT (s1701 module sessions only)
+
+**How MODULE is determined (check in this order):**
+1. If a `/scope [module]` banner was printed in this session's conversation context: use that module name.
+2. Else if `.autocode/modules/.active-module` exists: read its content (one line, trimmed) as MODULE.
+3. Else: MODULE is unset — use global paths throughout.
+
+**When MODULE is determined, print at the TOP of this command's output:**
+```
+╔══ Module scope: [MODULE] (source: scope banner / .active-module file) ══╗
+```
+
+If `MODULE` is set:
+- Replace `.autocode/tasks.md`             with `.autocode/modules/[MODULE]/tasks.md`
+- Replace `.autocode/agents/cto.md`        with `.autocode/modules/[MODULE]/cto.md`
+- Replace `.autocode/agents/security.md`   with `.autocode/modules/[MODULE]/security.md`
+- Replace `.autocode/agents/architect.md`  with `.autocode/modules/[MODULE]/architect.md`
+- Replace `.autocode/agents/qa.md`         with `.autocode/modules/[MODULE]/qa.md`
+- Replace `.autocode/debt.md`              with `.autocode/modules/[MODULE]/debt.md`
+- Replace `.autocode/carry-forward-log.md` with `.autocode/modules/[MODULE]/carry-forward-log.md`
+- Create any of these files with standard headers if they do not exist
+- `.autocode/patterns.md` is NOT replaced — stays global
+
+**When both MODULE and STREAM_ID are set simultaneously:**
+MODULE scopes to the module directory first. STREAM_ID further scopes within it.
+Combined path: `.autocode/modules/[MODULE]/stream-[STREAM_ID]/tasks.md`
+
+If `MODULE` is not set: use the standard global paths throughout this file.
+
+---
+
 ## PHASE 0: SETUP
 
 Before starting, run in the orchestrating session:
@@ -35,6 +66,9 @@ Read `.autocode/agents/architect.md` → `MEMORY_ARCHITECT` (or "None").
 Read `.autocode/agents/qa.md` → `MEMORY_QA` (or "None").
 Read `.autocode/agents/cto.md` → `CTO_MEMORY` (or "None").
 Extract known blind spots per agent from CTO_MEMORY as `CTO_INTELLIGENCE`.
+
+If MODULE is set: read `.autocode/modules/[MODULE]/standards.md` →
+`MODULE_STANDARDS_CHECKLIST` (or "None — no standards.md for this module yet").
 
 Read `.autocode/audit-checklist.md` → `CUSTOM_CHECKLIST`.
 If not found:
@@ -296,6 +330,18 @@ For every item in CUSTOM_CHECKLIST: apply the TOYOTA EVIDENCE RULE:
 
 If CUSTOM_CHECKLIST = "FALLBACK": note this prominently at the top of your output.
 A missing checklist is itself a gap — recommend running /meet to generate a stack-specific one.
+
+MODULE STANDARDS CHECKLIST (module-specific quality criteria — applies when MODULE_STANDARDS_CHECKLIST ≠ "None"):
+[MODULE_STANDARDS_CHECKLIST]
+
+If MODULE_STANDARDS_CHECKLIST ≠ "None": each criterion from MODULE_STANDARDS_CHECKLIST is a
+mandatory checklist item with these severity floors (same TOYOTA EVIDENCE RULE applies):
+- Items from "Module-Specific Quality Criteria" section: FINDING = severity-6 minimum
+- Items from "Known Fragile Areas" section: FINDING = severity-7 minimum
+- Items from "Seam Contracts" section: FINDING = severity-8 minimum
+
+Prefix all MODULE STANDARDS finding IDs with `MS-` (e.g. MS-001) to distinguish them.
+N/A is only valid if the diff genuinely does not touch code relevant to the criterion.
 
 RECENT FAILURE PATTERNS (auto-detected from patterns.md — these categories have recurred in recent audits. Check explicitly whether they appear in this diff):
 [LIVE_PATTERNS]
