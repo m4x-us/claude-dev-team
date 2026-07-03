@@ -174,11 +174,14 @@ This prevents two agents finding the same issue and generating duplicate tasks.
 ### Task #N: [Title]
 
 **Module:** [module]
-**Paths:** [relevant files]
+**File:** [primary file(s) — used by /advance for stream isolation]
+**Complexity:** ⚡ Direct — [evidence] / 🔧 Full — [evidence]
+**Owner:** —
+**Blocked by:** Nothing
 **Priority:** P1 / P2 / P3
 **Status:** OPEN
 
-**Problem:**
+**What:**
 [What is wrong and why it matters]
 
 **Acceptance Criteria:**
@@ -189,7 +192,19 @@ This prevents two agents finding the same issue and generating duplicate tasks.
 **Source:** [Security / Architecture / Tests / Product] — severity [N]
 ```
 
-**Carry-forward:** If `.autocode/modules/[module]/tasks.md` already exists, preserve any tasks with `**Status: OPEN` that are not superseded by new findings. Mark carried tasks with `**Carried from: [date]`.
+**Complexity labeling rules** (apply mechanically — /advance re-checks these but scan should pre-label correctly):
+- 3+ files in **File:** field → `🔧 Full — [N] files`
+- Any path containing `packages/` → `🔧 Full — packages/ boundary`
+- **What:** contains implement/integrate/new endpoint/new component/refactor/extract → `🔧 Full — [matched word]`
+- All three clear → `⚡ Direct — 1 file, no package boundary, single-scope change`
+
+**Batch structure** — wrap ALL tasks in this header so /advance can run immediately:
+```markdown
+## Batch 1 [CURRENT SPRINT]
+```
+Place this header at the top of the task file, before Task #1. Every task goes inside this batch.
+
+**Carry-forward:** If `.autocode/modules/[module]/tasks.md` already exists with a Batch structure, append new tasks to the existing batch and increment task numbers from the highest existing number. Preserve any tasks with `**Status: OPEN` that are not superseded by new findings. Mark carried tasks with `**Carried from: [date]`.
 
 ---
 
