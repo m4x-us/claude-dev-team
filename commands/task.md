@@ -174,7 +174,18 @@ Run DONE_WHEN mechanically:
 - UI behavior that cannot be verified in terminal → mark DEFERRED
 
 If DONE_WHEN FAILS: treat as failed build. Return to Step D.5 with failure noted in context.
-If DONE_WHEN PASSES or DEFERRED: proceed to Step D.7b.
+
+**Weak Assertion Gate (Rule 16 — runs on EVERY cycle, cannot be skipped):**
+For each test file in BUILD_RESULT.changed_files (files matching `*.test.ts` or `*.test.tsx`):
+```bash
+grep -n "\.toBeDefined()\|\.toBeTruthy()\|\.not\.toBeNull()\|\.not\.toBeUndefined()" [file]
+```
+For each match found: read the surrounding `it(` / `test(` block (±10 lines).
+If the block contains NO other `expect(` call asserting a specific value (`.toBe(`, `.toEqual(`, `.toContain(`, `.toHaveLength(`, `.toMatchObject(`, `.toHaveBeenCalledWith(`, `.toThrow(`):
+  → Treat as failed build. Return to Step D.5 with:
+  `WEAK_ASSERTION: [test name] in [file:line] — pseudocode assertion (Rule 16). Must assert a specific value.`
+
+If DONE_WHEN PASSES or DEFERRED and no WEAK_ASSERTION findings: proceed to Step D.7b.
 
 **Step D.7b — Direct Spot Check:**
 
@@ -507,6 +518,8 @@ You are writing production code that must last 10 years and be maintained by peo
 
 8. EARN EVERY ABSTRACTION — Extract only when logic appears 3+ places or hides genuine complexity. If removing the abstraction clarifies the code, inline it.
 
+9. REAL ASSERTIONS — Rule 16 (Enumerate Before You Assert): Every test must FAIL when the behavior is broken. `.toBeDefined()` / `.toBeTruthy()` / `.not.toBeNull()` as a standalone assertion is pseudocode — it passes even if the function returns the wrong value. Every assertion must name the specific expected value, structure, or behavior. For collections and output types: enumerate every member explicitly. Three assertions on an 8-field output is a Rule 16 violation.
+
 PROJECT_PRINCIPLES:
 [PROJECT_PHILOSOPHY — or "None — philosophy.md not found. Run /patterns to graduate learnings when ready."]
 
@@ -550,7 +563,19 @@ Run DONE_WHEN mechanically:
 If DONE_WHEN FAILS: treat as severity-6 finding labeled "DONE_WHEN_FAIL: [condition] — [evidence]".
 Inject into /audit via DONE_WHEN_FINDING.
 
-If DONE_WHEN PASSES or DEFERRED: proceed to Phase 2.
+**Weak Assertion Gate (Rule 16 — runs on EVERY cycle, cannot be skipped):**
+For each test file in BUILD_RESULT.changed_files (files matching `*.test.ts` or `*.test.tsx`):
+```bash
+grep -n "\.toBeDefined()\|\.toBeTruthy()\|\.not\.toBeNull()\|\.not\.toBeUndefined()" [file]
+```
+For each match found: read the surrounding `it(` / `test(` block (±10 lines).
+If the block contains NO other `expect(` call that asserts a specific value (`.toBe(`, `.toEqual(`, `.toContain(`, `.toHaveLength(`, `.toMatchObject(`, `.toHaveBeenCalledWith(`, `.toThrow(`):
+  → This is pseudocode. Treat as severity-8 FAIL:
+  `WEAK_ASSERTION: [test name] in [file:line] — .toBeDefined()/.toBeTruthy() is pseudocode when no specific value is also asserted (Rule 16)`
+  Inject into /audit via DONE_WHEN_FINDING.
+  The build cycle does NOT proceed to Phase 2 until all WEAK_ASSERTION findings are resolved.
+
+If DONE_WHEN PASSES or DEFERRED and no WEAK_ASSERTION findings: proceed to Phase 2.
 
 ---
 

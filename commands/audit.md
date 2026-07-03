@@ -407,12 +407,17 @@ It is a separate lane printed alongside the audit, not merged into it.
 
 After collecting Agent N's output, check for pseudocode assertions:
 Count lines in NAIVE_FINDINGS containing "pseudocode" or "ASSERTION CHECK".
-If count ≥ 1: print:
+If count ≥ 1:
 ```
-⚠ NAIVE GATE: Agent N found [N] pseudocode assertion(s).
-  These tests pass with wrong implementations. See Naive Reader Findings below.
-  Agent K will formally verify whether these are addressed.
+🚫 NAIVE GATE: HARD FAIL — Agent N found [N] pseudocode assertion(s).
+  Rule 16 violation: these tests pass with wrong implementations.
+  The audit verdict is FAIL regardless of all other findings.
+  These MUST be fixed before this task can close.
+  See Naive Reader Findings below. Agent K will formally cite each one.
 ```
+Set NAIVE_GATE_FAIL = true. This overrides any PASS verdict from Agent C — the audit result is FAIL.
+
+If count = 0: NAIVE_GATE_FAIL = false. Proceed normally.
 
 **Agent K — Contract Verifier**
 
@@ -1014,7 +1019,14 @@ If `MODE = "standalone"`:
       Run `/task #[TASK_NUM]`. Stop.
   If no task number detected in $ARGUMENTS: stop.
 
-**If verdict = PASS:**
+**If NAIVE_GATE_FAIL = true AND verdict = PASS:**
+Override verdict to FAIL. Prepend to FINDINGS_JSON:
+```json
+{"id":"NAIVE-001","category":"tests","severity":8,"file":"[file from NAIVE_FINDINGS]","function":"[test name]","line":0,"description":"Rule 16 violation: pseudocode assertion — test passes with wrong implementation. Must assert specific value, not just existence.","annotation":"NAIVE_GATE_OVERRIDE"}
+```
+Emit AUDIT_RESULT_FINAL with verdict FAIL. The cycle repeats.
+
+**If verdict = PASS and NAIVE_GATE_FAIL = false:**
 Append to `.autocode/trends.md`:
 ```
 | [today's date] | [first 60 chars of $ARGUMENTS] | [N cycles] | [final severity] | PASS |

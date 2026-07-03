@@ -136,6 +136,7 @@ A finding without evidence is a guess, not a finding.
 ### Agent 3: Test Quality
 - For each source file, check for a co-located test file
 - For each test file: check for self-referential tests (expected built from same method as actual), mocks that pass instead of real implementations
+- **Rule 16 — Enumerate Before You Assert (HARD CHECK):** For every `it(` / `test(` block, grep for `.toBeDefined()`, `.toBeTruthy()`, `.not.toBeNull()`, `.not.toBeUndefined()`. If any appear as the ONLY assertion in that block (no `.toBe(`, `.toEqual(`, `.toContain(`, `.toMatchObject(`, `.toHaveBeenCalledWith(`), flag it as severity-8: "pseudocode assertion — passes with wrong implementation"
 - Check: are the critical paths tested? Are error branches tested?
 - Note: test files that mock too much vs test files that test behavior
 - Output: structured findings in SCAN format above
