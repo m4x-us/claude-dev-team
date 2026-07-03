@@ -136,7 +136,6 @@ A finding without evidence is a guess, not a finding.
 ### Agent 3: Test Quality
 - For each source file, check for a co-located test file
 - For each test file: check for self-referential tests (expected built from same method as actual), mocks that pass instead of real implementations
-- **Rule 16 — Enumerate Before You Assert (HARD CHECK):** For every `it(` / `test(` block, grep for `.toBeDefined()`, `.toBeTruthy()`, `.not.toBeNull()`, `.not.toBeUndefined()`. If any appear as the ONLY assertion in that block (no `.toBe(`, `.toEqual(`, `.toContain(`, `.toMatchObject(`, `.toHaveBeenCalledWith(`), flag it as severity-8: "pseudocode assertion — passes with wrong implementation"
 - Check: are the critical paths tested? Are error branches tested?
 - Note: test files that mock too much vs test files that test behavior
 - Output: structured findings in SCAN format above
@@ -254,6 +253,33 @@ If `.autocode/modules/[module]/profile.md` doesn't exist, write it:
 
 ## Known Gotchas
 [non-obvious constraints, pitfalls, recurring issues]
+```
+
+**Write audit-checklist.md if it doesn't exist:**
+If `.autocode/modules/[module]/audit-checklist.md` doesn't exist, write it — synthesized from the scan findings, specific to this module's recurring risk patterns:
+```markdown
+# [Module] Audit Checklist
+
+**Module:** [module]
+**Generated:** [date]
+
+## ALWAYS CHECK (every task in this module)
+[From severity 7-9 findings: the patterns most likely to recur — auth gaps, async contracts, data-loss risks specific to this module's architecture]
+[ ] [item]
+[ ] [item]
+
+## TEAM_SPECIFIC LAYER
+[From severity 5-6 findings: module-specific quality criteria that /advance will auto-promote patterns into]
+
+## KNOWN BLIND SPOTS
+[From scan agent findings: categories historically missed in this module — what to explicitly state CHECKED or FINDING on]
+[ ] [item]
+```
+
+If `.autocode/modules/[module]/audit-checklist.md` already exists: **do not overwrite**. Append a dated section if the scan found new high-severity patterns not already present:
+```markdown
+## [today's date] — /scan update
+[ ] [new checklist item from this scan]
 ```
 
 **Write standards.md if it doesn't exist:**
