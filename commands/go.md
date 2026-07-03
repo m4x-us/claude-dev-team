@@ -102,9 +102,65 @@ Print:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
+── Worktree Navigation ──
+
+Read from QUEUE_FILE frontmatter:
+  WORKTREE_PATH ← value of `worktree:` line (empty string if field is absent)
+  WORKTREE_BRANCH ← value of `branch:` line (empty string if field is absent)
+
+If WORKTREE_PATH is non-empty:
+
+  Step 1 — Verify path exists:
+    Run Bash: [ -d "[WORKTREE_PATH]" ]
+    If path does NOT exist:
+      Print:
+      "✗ WORKTREE NOT FOUND: [WORKTREE_PATH]
+       
+       /advance creates this in W.3 before sending workers.
+       
+       This is a hard stop. Do not run /task until the worktree exists.
+       Return to Wait state.
+       
+       Recovery:
+         If /advance is still in W.3: wait for it to finish, then retry /go [AGENT_NAME]
+         If /advance crashed: re-run it — the stale check offers to prune and recreate"
+      Stop.
+
+  Step 2 — Verify .autocode symlink:
+    Run Bash: [ -L "[WORKTREE_PATH]/.autocode" ] || [ -d "[WORKTREE_PATH]/.autocode" ]
+    If neither:
+      Print: "⚠ .autocode symlink missing in worktree — suite commands won't find task files.
+      Fix (run this Bash): rm -rf [WORKTREE_PATH]/.autocode && ln -sf $(git rev-parse --show-toplevel)/.autocode [WORKTREE_PATH]/.autocode"
+      (Print warning but do not stop — symlink can be recreated before first /task)
+
+  Print:
+  "╔══ Worktree isolation active ══════════════════════╗
+   ║  Path:    [WORKTREE_PATH]
+   ║  Branch:  [WORKTREE_BRANCH]
+   ║  .autocode → main repo symlink verified ✓
+   ╠═══════════════════════════════════════════════════╣
+   ║  FIRST ACTION: cd [WORKTREE_PATH]
+   ║  Then run your tasks as normal.
+   ╚═══════════════════════════════════════════════════╝"
+
+Else:
+  Print: "⚠ No 'worktree:' field in queue file — running in shared working directory.
+  (Pre-worktree-isolation format. No file isolation. Edits can be wiped by concurrent sessions.)"
+
 ---
 
 ## Step 4 — Execute brief
+
+If WORKTREE_PATH is non-empty:
+  Print:
+  "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    ISOLATION REMINDER — before your first /task:
+    1. cd [WORKTREE_PATH]   (sets CWD; routes all file edits to your worktree)
+    2. pwd                  (verify — must print [WORKTREE_PATH])
+    3. Then run /task normally
+    Skipping the cd means your edits land in the shared working tree and can be
+    wiped by a concurrent session. The cd is not optional.
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 Read QUEUE_FILE again. Extract the brief body: everything after the closing `---` of the frontmatter (skip the frontmatter block entirely).
 
