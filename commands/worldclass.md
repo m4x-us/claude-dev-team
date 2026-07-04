@@ -387,6 +387,28 @@ Architecture deductions use the category the agent tagged. Vibes deductions use 
 
 **If COMBINED_SCORE ≥ 95 AND AC_RESULT verdict = PASS (or SKIPPED):**
 
+**Write the commit gate artifact (if there is a staged diff):**
+Run `bash scripts/staged-diff-hash.sh` → `GATE_HASH`. If `GATE_HASH` is not `NONE`
+(i.e. there is a currently-staged source diff — this is the normal case when
+WorldClass was invoked via `/fff-gate` on a FULL-tier commit, or directly
+before committing), write `.autocode/reviews/gate/[GATE_HASH].json`:
+```json
+{
+  "mode": "worldclass",
+  "diffHash": "[GATE_HASH]",
+  "timestamp": "[ISO timestamp]",
+  "verdict": "PASS",
+  "score": [COMBINED_SCORE],
+  "cycles": [N]
+}
+```
+This satisfies `.husky/pre-commit`'s FFF/WorldClass gate for this exact
+staged diff — the commit is not required to route through `/fff-gate`
+separately if it already went through a full WorldClass pass. If `GATE_HASH`
+is `NONE` (nothing staged — e.g. WorldClass was run on already-committed
+code, or mid-task before staging), skip this step; the gate isn't relevant
+until something is staged.
+
 **Write agent memory updates:**
 Append to `.autocode/agents/architect.md` → `## Past Findings — Resolved`: any architecture deductions from this cycle that scored < 95 in prior cycles but are now resolved.
 Append to `.autocode/agents/qa.md` → `## Past Findings — Resolved`: any QA deductions that are now resolved.

@@ -280,7 +280,7 @@ FAIL   = any issue with severity ≥ 5
 Read SPOT_CHECK_RESULT from the agent output.
 
 **If SPOT_CHECK: PASS:**
-Proceed to Step D.8.
+Proceed to Step D.7c.
 
 **If SPOT_CHECK: WARN:**
 For each issue found:
@@ -288,6 +288,38 @@ For each issue found:
   `| [today's date] | Task #[TASK_NUM] | [category] | [description] | [severity] | [Direct/Full] | auto — Direct spot check warn |`
 - Also append to `.autocode/patterns.md` under today's date (same format as full audit patterns).
 Print: "⚠ Direct spot check: [N] warn item(s) logged to debt.md. Proceeding to close."
+Proceed to Step D.7c.
+
+**Step D.7c — FFF Gate + Commit:**
+
+If BUILD_RESULT.changed_files is empty (investigation-only task, nothing to commit): skip this
+step entirely, proceed to Step D.8.
+
+Stage this task's changes — targeted, not `-A`, so unrelated uncommitted work elsewhere in the
+working directory (e.g. another session's in-progress files) is never swept into this commit:
+```
+git add [BUILD_RESULT.changed_files, space-separated]
+```
+
+Run: `bash scripts/staged-diff-hash.sh` → HASH.
+
+If HASH = "NONE" (only doc/config/non-source files staged — no `.ts`/`.tsx`/`.js`/`.jsx` diff):
+skip the gate, proceed directly to the commit below.
+
+Otherwise, a Direct task always uses the lightweight FFF tier — never the full WorldClass loop
+(if the fresh-eyes review below surfaces something that feels Full-tier serious, that itself is
+a signal this task was mis-classified as Direct; note it and consider Step D.7b's Full-conversion
+path instead of forcing the review through). Run the `fff-gate` skill now.
+
+If the FFF gate does not produce a PASS artifact for this HASH (validation failed, or a real
+problem was found): fix the problem, re-run Step D.7c from the top (re-staging will produce a
+new HASH). Do not proceed to commit on an unresolved gate.
+
+Once `.autocode/reviews/gate/[HASH].json` exists with `"verdict": "PASS"`:
+```
+git commit -m "task #[TASK_NUM]: [first line of task description]"
+```
+
 Proceed to Step D.8.
 
 **If SPOT_CHECK: FAIL:**
@@ -326,7 +358,7 @@ CTO diagnosis run: NO — Direct task
 ```
 
 Ask Max:
-> "Direct task #[TASK_NUM] complete. Spot check: [PASS/WARN]. Done-when: [PASS/DEFERRED]. Mark done? yes/no"
+> "Direct task #[TASK_NUM] complete. Spot check: [PASS/WARN]. Done-when: [PASS/DEFERRED]. Committed as [commit hash from Step D.7c, or "no changes to commit"]. Mark done? yes/no"
 
 If no: stop. Task remains open.
 
@@ -697,6 +729,18 @@ This format is machine-parseable by Step 0.5 in the NEXT cycle. Descriptions wit
 
 ## PHASE 3: WORLDCLASS
 
+**Stage this task's changes before scoring** — targeted, not `-A`, so unrelated uncommitted work
+elsewhere in the working directory is never swept in:
+```
+git add [BUILD_RESULT.changed_files (Phase 1) or FULL_DIFF_OVERRIDE file list, space-separated]
+```
+This must happen before `/worldclass` runs: its PASS branch writes the commit-gate artifact
+(`.autocode/reviews/gate/<hash>.json`) keyed to whatever is currently staged. If nothing is
+staged when WorldClass scores, the artifact hash won't match anything Phase 4 later commits, and
+the FFF/WorldClass pre-commit gate will reject that commit even though a real WorldClass pass
+already happened. If BUILD_RESULT.changed_files is empty (investigation-only cycle): skip
+staging, WorldClass runs against an empty diff as normal, and Phase 4 skips its commit step.
+
 Run: `/worldclass Task #[TASK_NUM]: [TASK_DEFINITION first line]`
 Wait for WORLDCLASS_RESULT.
 
@@ -831,11 +875,32 @@ Note: No resolved sweep. A finding absent from this audit may simply not have be
 
 Print: "Agent memories updated — security ([N] open), architect ([N] open), qa ([N] open)."
 
+**Step 4.0c — Commit:**
+
+If nothing was staged in Phase 3 (investigation-only cycle, BUILD_RESULT.changed_files was
+empty): skip this step, proceed to Step 4.1.
+
+The commit-gate artifact for this staged diff was already written by `/worldclass`'s PASS
+branch in Phase 3 — confirm it's there before committing:
+```
+HASH=$(bash scripts/staged-diff-hash.sh)
+```
+If `HASH` = "NONE" or `.autocode/reviews/gate/$HASH.json` doesn't show `"verdict": "PASS"`: stop
+and investigate before committing — this means either nothing is actually staged, or the files
+staged in Phase 3 no longer match what's staged now (something changed the diff after WorldClass
+scored it). Re-run Phase 3's staging step and confirm the hash is stable before proceeding.
+
+Otherwise:
+```
+git commit -m "task #[TASK_NUM]: [first line of task description]"
+```
+
 **Step 4.1 — Ask Max before closing:**
 
 Print:
 ─────────────────────────────────────────────────────────────
   Task #[TASK_NUM] passed audit. WorldClass: [score]/100 | Cycles: [N]
+  Committed as [commit hash from Step 4.0c, or "no changes to commit"].
   Mark it complete and start the next task?
 
     yes → mark #[TASK_NUM] complete, start next task
