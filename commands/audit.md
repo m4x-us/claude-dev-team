@@ -991,33 +991,153 @@ Emit and stop:
 AUDIT_RESULT_FINAL: {"verdict":"FAIL","findings":[...FINDINGS_JSON array verbatim from Agent C output...],"cycles_run":N,"escalate":[true/false],"naive_findings":"[NAIVE_FINDINGS verbatim, or 'None']"}
 ```
 
-If `MODE = "orchestrated"`: stop here. /task handles the fix cycle and retry.
-If `MODE = "standalone"`:
-  Print the findings list.
-  If $ARGUMENTS contains a task number (matches `#\d+` or a bare integer):
-    Extract TASK_NUM (e.g. "#001" → 1 → zero-padded to match tasks.md format).
-    Print:
-    ```
-    ─────────────────────────────────────────────────────────────
-      Found [findings_count] issues ([critical] critical, [major] major, [minor] minor).
-      Send to the dev team to fix?
+── PROMOTE FINDINGS TO BATCH TASKS ──
 
-        yes → /task #[TASK_NUM] starts a fix cycle now
-        no  → stop here, review findings above first
-    ─────────────────────────────────────────────────────────────
-    ```
-    Wait for user input.
-    If no: stop.
-    If yes:
-      Open `.autocode/tasks.md`. Find the `### Task #[TASK_NUM]` block.
-      Find the line immediately after the `**Owner:**` line in that block.
-      Remove any existing `**Audit findings —` block if present (replace it — don't accumulate stale findings).
-      Insert these lines at that position:
-        `**Audit findings — [today's date]** ([findings_count] issues pending fix):`
-        For each finding in FINDINGS_JSON:
-        `- [[finding.id]] [finding.category] [finding.description] — severity [finding.severity] | [finding.file]:[finding.function]:[finding.line]`
-      Run `/task #[TASK_NUM]`. Stop.
-  If no task number detected in $ARGUMENTS: stop.
+Resolve TASKS_PATH:
+  If MODULE is set: TASKS_PATH = .autocode/modules/[MODULE]/tasks.md
+  Else: TASKS_PATH = .autocode/tasks.md
+
+── TOYOTA STOP: validate FINDINGS_JSON before writing ──
+For each finding in FINDINGS_JSON:
+  If finding is missing ANY of: file, description, severity:
+    Print: "⚠ Skipping malformed finding [finding.id or 'unknown'] — missing required
+    field(s). Will not write incomplete task. Fix the audit agent output."
+    Remove finding from promotion set. Continue.
+If ALL findings are malformed: print "All findings malformed — no tasks promoted.
+Audit agent output must be fixed before promotion can run." Stop.
+── end TOYOTA STOP ──
+
+If TASKS_PATH does not exist:
+  Create it with content:
+  ```
+  ## Batch 1 [CURRENT SPRINT]
+  ```
+  BATCH_NUM = 1
+  NEXT_NUM = 1
+Else:
+  BATCH_NUM = highest integer N in any "## Batch [N]" header in TASKS_PATH (default 1 if none found)
+  NEXT_NUM = (highest integer N in any "### Task #[N]" line across ALL batches) + 1
+             (default 1 if no tasks exist yet)
+
+  EXISTING_AUDIT_KEYS = set of strings built from OPEN tasks only (tasks with no "**Status: COMPLETE" line):
+    For each OPEN task that has a "**Source:** Audit finding" line:
+      key = (value of **File:** field in that task block) + "|" + (first 50 chars of task title, lowercased)
+            Where task title = text after "### Task #N: " on the ### line
+
+N_PROMOTED = 0
+N_SKIPPED = 0
+PROMOTED_TASKS = []
+
+For each finding in promotion set (already validated above):
+  DEDUP_KEY = finding.file + "|" + finding.description[:50].lower()
+  If DEDUP_KEY in EXISTING_AUDIT_KEYS:
+    N_SKIPPED += 1
+    Continue
+
+  PRIORITY = "P1" if finding.severity >= 8, "P2" if finding.severity >= 6, else "P3"
+  COMPLEXITY = "🔧 Full — packages/ boundary" if "packages/" in finding.file
+               else "⚡ Direct — 1 file, single-scope fix"
+
+  ── Append location: ──
+  Find the "## Batch [BATCH_NUM]" header in TASKS_PATH.
+  Find the last `---` separator that closes a task block within that batch section
+  (i.e., before the next `## Batch` header, a `## Notes` section, or EOF).
+  Insert the new task block immediately after that `---` separator (with a blank line).
+  If the file has no task blocks yet under that batch (only the ## Batch header exists):
+  insert immediately after the ## Batch header line.
+  ── End append location ──
+
+  Write this block at that location:
+
+  ### Task #[NEXT_NUM]: Fix [finding.category]: [finding.description]
+
+  **File:** [finding.file]
+  **Complexity:** [COMPLEXITY]
+  **Owner:** —
+  **Blocked by:** Nothing
+  **Priority:** [PRIORITY]
+  **Status:** OPEN
+
+  **What:**
+  [finding.description] at [finding.file]:[finding.function]:[finding.line].
+  [If finding.annotation is non-empty: append it here as a separate line. Else: omit.]
+
+  **Acceptance Criteria:**
+  - [ ] Fix [finding.category] issue at [finding.file]:[finding.function]:[finding.line]
+  - [ ] Audit passes: bash scripts/deep-audit.sh [finding.file]
+
+  **Source:** Audit finding [finding.id] — severity [finding.severity] — [finding.category]
+
+  ---
+
+  Add DEDUP_KEY to EXISTING_AUDIT_KEYS (prevent double-append within this audit run)
+  PROMOTED_TASKS.append({ num: NEXT_NUM, priority: PRIORITY, severity: finding.severity,
+                           description: finding.description, file: finding.file })
+  NEXT_NUM += 1
+  N_PROMOTED += 1
+
+── End of promotion write ──
+
+If `MODE = "orchestrated"`:
+  Print (even if N_PROMOTED = 0 — Max must see the dedup count):
+  ```
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    AUDIT → BATCH [BATCH_NUM]: [N_PROMOTED] tasks added, [N_SKIPPED] skipped (already tracked)
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  [For each task in PROMOTED_TASKS:]
+    #[num] [priority] sev [severity] — [description] ([file])
+
+  Orchestrator will pick these up in the NEXT /advance wave (W.0 re-reads tasks.md fresh).
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ```
+  Stop.
+
+If `MODE = "standalone"`:
+  Print the findings list (as before).
+
+  If $ARGUMENTS contains a task number (matches `#\d+` or a bare integer):
+    Extract TASK_NUM.
+    Open TASKS_PATH. Find the `### Task #[TASK_NUM]` block.
+    Find the line immediately after the `**Owner:**` line in that block.
+    Remove any existing `**Audit findings —` block if present.
+    Insert:
+      `**Audit findings — [today's date]** ([findings_count] issues pending fix):`
+      For each finding in FINDINGS_JSON:
+      `- [[finding.id]] [finding.category] [finding.description] — severity [finding.severity] | [finding.file]:[finding.function]:[finding.line]`
+
+  Print promotion banner and wait for approval:
+  ```
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    AUDIT FINDINGS → BATCH [BATCH_NUM]
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    [N_PROMOTED] findings promoted as new tasks:
+  [For each task in PROMOTED_TASKS:]
+      #[num] [priority] sev [severity] — [description] ([file])
+    [N_SKIPPED] already tracked as open tasks (skipped)
+
+    Run /advance now?
+      yes           — start next wave (new tasks already in batch)
+      review first  — print the new task blocks, then ask again
+      no            — tasks are saved, run /advance when ready
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ```
+
+  Wait for Max input.
+  Affirmatives: yes / y / yeah / go / proceed
+  Negatives: no / n / not yet / later
+  If input doesn't match any of the above: re-prompt ONCE: "Unrecognized response. Run /advance now? [yes / no]"
+  If STILL unrecognized: default to no (safe default). Do not loop again.
+
+  If "review first": print each newly-added task block in full from TASKS_PATH.
+    Re-print: "Run /advance now? [yes / no]". Wait. Apply same affirmative/negative logic above.
+  If affirmative: run /advance. Stop.
+  If negative: print "Tasks are in Batch [BATCH_NUM]. Run /advance when ready." Stop.
+
+  If N_PROMOTED = 0:
+    Print: "All [findings_count] findings already tracked as open tasks — nothing new added."
+    Ask: "Run /advance to continue fixing them? [yes / no]"
+    Wait. Apply same affirmative/negative/unrecognized logic. Stop.
 
 **If NAIVE_GATE_FAIL = true AND verdict = PASS:**
 Override verdict to FAIL. Prepend to FINDINGS_JSON:
@@ -1054,8 +1174,27 @@ If NAIVE_FINDINGS is non-empty, print before emitting:
 AUDIT_RESULT_FINAL: {"verdict":"PASS","findings":[...FINDINGS_JSON array verbatim from Agent C output...],"cycles_run":N,"escalate":false,"naive_findings":"[NAIVE_FINDINGS verbatim, or 'None']"}
 ```
 
-If `MODE = "standalone"`: print `✅ Audit passed.` then run `/worldclass $ARGUMENTS`.
-If `MODE = "orchestrated"`: print `✅ Audit passed.` and stop. /task handles /worldclass.
+Resolve TASKS_PATH:
+  If MODULE is set: TASKS_PATH = .autocode/modules/[MODULE]/tasks.md
+  Else: TASKS_PATH = .autocode/tasks.md
+
+OPEN_AUDIT_TASK_COUNT = 0
+If TASKS_PATH exists:
+  For each task block in TASKS_PATH that:
+    (a) does NOT contain "**Status: COMPLETE" AND
+    (b) has a "**Source:**" line containing "Audit finding":
+      OPEN_AUDIT_TASK_COUNT += 1
+
+If `MODE = "standalone"`:
+  If OPEN_AUDIT_TASK_COUNT > 0:
+    print `✅ Audit passed. [OPEN_AUDIT_TASK_COUNT] prior audit tasks still open in
+    Batch [BATCH_NUM] — verify they were fixed and mark COMPLETE, or let /advance close them.`
+  Else:
+    print `✅ Audit passed. No outstanding audit tasks.`
+  Run `/worldclass $ARGUMENTS`.
+
+If `MODE = "orchestrated"`:
+  print `✅ Audit passed.` and stop. /task handles /worldclass.
 
 **If 5 cycles are reached without PASS:**
 Append to `.autocode/trends.md`:
