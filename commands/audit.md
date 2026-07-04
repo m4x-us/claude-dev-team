@@ -1178,8 +1178,10 @@ Resolve TASKS_PATH:
   If MODULE is set: TASKS_PATH = .autocode/modules/[MODULE]/tasks.md
   Else: TASKS_PATH = .autocode/tasks.md
 
+BATCH_NUM = 1
 OPEN_AUDIT_TASK_COUNT = 0
 If TASKS_PATH exists:
+  BATCH_NUM = highest integer N in any "## Batch [N]" header in TASKS_PATH (default 1 if none found)
   For each task block in TASKS_PATH that:
     (a) does NOT contain "**Status: COMPLETE" AND
     (b) has a "**Source:**" line containing "Audit finding":
