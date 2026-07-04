@@ -19,6 +19,7 @@ import json
 import fcntl
 import tempfile
 import argparse
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 POOL_NAMES = [
@@ -31,10 +32,15 @@ POOL_NAMES = [
 ]
 
 POOL_FILENAME = ".worker-pool.json"
+LOCK_FILENAME = ".worker-pool.lock"
 
 
 def get_pool_path(pool_dir):
     return os.path.join(pool_dir, POOL_FILENAME)
+
+
+def get_lock_path(pool_dir):
+    return os.path.join(pool_dir, LOCK_FILENAME)
 
 
 def get_workers_path(pool_dir, module):
@@ -58,20 +64,37 @@ def atomic_write_pool(pool_path, data):
         raise
 
 
-def load_pool_locked(pool_path):
-    """Open pool file, acquire exclusive lock, return (fh, data). Caller must close fh."""
-    fh = open(pool_path, "r")
-    fcntl.flock(fh, fcntl.LOCK_EX)
+@contextmanager
+def pool_lock(pool_dir):
+    """Acquire an exclusive lock on the stable lock file for the full read-modify-write cycle.
+
+    Uses a separate, never-replaced lock file (.worker-pool.lock) so the flock stays on
+    the same inode even after atomic_write_pool swaps the data file. Without this, a
+    concurrent session that opened the data file before the swap holds a lock on the old
+    inode and wakes up to stale data — a silent lost-update.
+    """
+    os.makedirs(pool_dir, exist_ok=True)
+    lock_path = get_lock_path(pool_dir)
+    lf = open(lock_path, "w")
     try:
-        data = json.load(fh)
-    except json.JSONDecodeError as e:
-        fh.close()
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(lf, fcntl.LOCK_UN)
+        lf.close()
+
+
+def load_pool(pool_path):
+    """Read and parse the pool file. Must be called inside a pool_lock() block."""
+    try:
+        with open(pool_path, "r") as f:
+            return json.load(f)
+    except json.JSONDecodeError:
         print(
             f"Pool file corrupt at {pool_path}. Delete and re-init.",
             file=sys.stderr,
         )
         sys.exit(1)
-    return fh, data
 
 
 def write_workers_file(pool_dir, module, names):
@@ -104,8 +127,9 @@ def cmd_claim(args):
     n = args.n if args.n and args.n > 0 else 4
     n = max(1, min(24, n))
 
-    fh, data = load_pool_locked(pool_path)
-    try:
+    with pool_lock(args.pool_dir):
+        data = load_pool(pool_path)
+
         # Idempotency: if module already claimed, return existing workers unchanged
         if module in data["claims"]:
             existing = data["claims"][module]["workers"]
@@ -139,10 +163,8 @@ def cmd_claim(args):
         write_workers_file(args.pool_dir, module, claimed)
         atomic_write_pool(pool_path, data)
 
-        for name in claimed:
-            print(name.lower())
-    finally:
-        fh.close()
+    for name in claimed:
+        print(name.lower())
 
 
 def cmd_release(args):
@@ -153,8 +175,9 @@ def cmd_release(args):
 
     module = args.module.strip().lower()
 
-    fh, data = load_pool_locked(pool_path)
-    try:
+    with pool_lock(args.pool_dir):
+        data = load_pool(pool_path)
+
         if module not in data["claims"]:
             print(f"Module '{module}' has no active claim.", file=sys.stderr)
             return
@@ -168,8 +191,6 @@ def cmd_release(args):
         data["pool"].extend(to_append)
 
         atomic_write_pool(pool_path, data)
-    finally:
-        fh.close()
 
     # Delete .workers file (silently ignore if missing)
     workers_path = get_workers_path(args.pool_dir, module)
