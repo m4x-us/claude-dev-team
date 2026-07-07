@@ -788,7 +788,30 @@ If WORLDCLASS_RESULT.verdict = "MAX_CYCLES":
       Or accept current score and close the task? yes / no
     ─────────────────────────────────────────────────────────────
     Wait for user input.
-    If yes: proceed to Phase 4 (mark complete at current score).
+    If yes:
+      **Write the commit-gate artifact for this accepted-below-threshold score.** /worldclass's
+      own PASS branch only writes this artifact at COMBINED_SCORE ≥ 95, so without this step an
+      explicit Max accept at MAX_CYCLES has nowhere to record itself and Phase 4.0c's commit check
+      stays permanently blocked on work Max has already signed off on.
+      Run `bash scripts/staged-diff-hash.sh` → `HASH`. If `HASH` is not `NONE`, write
+      `.autocode/reviews/gate/[HASH].json`:
+      ```json
+      {
+        "mode": "worldclass",
+        "diffHash": "[HASH]",
+        "timestamp": "[ISO timestamp]",
+        "verdict": "PASS",
+        "score": [COMBINED_SCORE],
+        "cycles": 5,
+        "accepted": true,
+        "acceptedReason": "[one sentence — why the remaining gap is structurally blocked, not unaddressed]"
+      }
+      ```
+      This is not the forbidden gate-bypass — the review genuinely ran to its full 5-cycle limit
+      and Max explicitly authorized proceeding at this prompt; `"accepted": true` keeps that
+      distinction honest and permanent in the record rather than indistinguishable from a real
+      ≥95 pass.
+      Proceed to Phase 4 (mark complete at current score).
     If no: stop. Task stays open. Run /task #[TASK_NUM] again when ready.
 
   If WC_CYCLE < 5: return to Phase 1 Step 1.1. The build agent receives the WorldClass deductions via CYCLE_HISTORY and must fix them before the audit re-runs.
