@@ -136,6 +136,11 @@ A finding without evidence is a guess, not a finding.
 ### Agent 3: Test Quality
 - For each source file, check for a co-located test file
 - For each test file: check for self-referential tests (expected built from same method as actual), mocks that pass instead of real implementations
+- **Rule 16 — Enumerate Before You Assert (HARD CHECK):** For every `it(` / `test(` block:
+  1. STRIP `.not.`-prefixed matchers before allowed-list matching: a matcher reached through `.not.` NEVER counts as a concrete assertion, even though its text contains an allowed substring (`.not.toBeNull()` contains `.toBeNull(` — matching without stripping is a guaranteed false negative).
+  2. WEAK forms: `.toBeDefined()`, `.toBeTruthy()`, `.toBeFalsy()`, `.not.toBeNull()`, `.not.toBeUndefined()`, and bare `.toHaveBeenCalled()` (no `With`/`Times` suffix — it proves an invocation happened, not what was passed).
+  3. ALLOWED (concrete) forms — checked only AFTER step-1 stripping: `.toBe(`, `.toEqual(`, `.toStrictEqual(`, `.toContain(`, `.toContainEqual(`, `.toHaveLength(`, `.toMatch(`, `.toMatchObject(`, `.toMatchSnapshot(`, `.toMatchInlineSnapshot(`, `.toThrow(`, `.toThrowError(`, `.toHaveBeenCalledWith(`, `.toHaveBeenCalledTimes(`, `.toHaveProperty(`, `.toBeNull(`, `.toBeInstanceOf(` (asserts a concrete type — allowed), `.toBeCloseTo(`, `.toBeGreaterThan(`/`.toBeGreaterThanOrEqual(`/`.toBeLessThan(`/`.toBeLessThanOrEqual(`, `.rejects.`/`.resolves.` chains, `expect.assertions(`.
+  4. If a block's assertions are ONLY weak forms, flag severity-8: "pseudocode assertion — passes with wrong implementation".
 - Check: are the critical paths tested? Are error branches tested?
 - Note: test files that mock too much vs test files that test behavior
 - Output: structured findings in SCAN format above

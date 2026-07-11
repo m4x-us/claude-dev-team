@@ -104,19 +104,28 @@ Examples:
 
 If `$ARGUMENTS` starts with "clear" (case-insensitive):
 
-**Exact sequence (order is critical — read `.active-module` BEFORE deleting it):**
-1. If `.autocode/modules/.active-module` exists: read its content → CURRENT_MODULE (trim whitespace).
+**Exact sequence (order is critical — resolve the module BEFORE deleting markers):**
+1. Resolve CURRENT_MODULE:
+   ```bash
+   bash scripts/wave-worktrees.sh get-module
+   ```
+   (Falls back to the legacy `.autocode/modules/.active-module` automatically.)
 2. If CURRENT_MODULE is non-empty:
    ```bash
    POOL_DIR="$(git rev-parse --show-toplevel)/.autocode/modules"
    python3 ~/.claude/scripts/worker-pool.py --pool-dir "$POOL_DIR" release [CURRENT_MODULE]
    ```
    Print the script's stdout (it confirms what was released).
-3. Delete the file:
+3. Delete this checkout's marker; delete the legacy file only when in the main checkout:
    ```bash
-   rm -f .autocode/modules/.active-module
+   rm -f "$(git rev-parse --absolute-git-dir)/active-module"
+   [ "$(git rev-parse --absolute-git-dir)" = "$(git rev-parse --path-format=absolute --git-common-dir)" ] \
+     && rm -f .autocode/modules/.active-module
    ```
-4. Print: "Module scope cleared — this session will use global paths."
+4. Print: "Module scope cleared — this session will use global paths.
+   (The module worktree, if any, is NOT removed — worktrees are durable across
+   sessions. Retiring a module branch is a merge/cleanup decision made with Max
+   from the main checkout, never a side effect of /scope clear.)"
 5. Stop. Do not proceed to Step 1.
 
 ---
@@ -130,6 +139,74 @@ Which module is this window working on?
 ```
 
 Validate the input against the registry. If not found, list available modules and ask again.
+
+---
+
+## STEP 1.5 — Module worktree (MANDATORY isolation)
+
+Module windows never share the main checkout's index. This step gives this
+window its own worktree, or confirms it is already in one.
+
+**A. Already in this module's worktree?**
+```bash
+git rev-parse --abbrev-ref HEAD
+```
+If it prints `[MODULE]-window`: print "✓ already in the [MODULE] module worktree ($(pwd))",
+then verify the reused worktree is still healthy — long-lived worktrees can lose
+their armed hooks or .autocode symlink between sessions, and a reused worktree
+that skips verification runs the silent-zero-hooks failure this whole step exists to close:
+```bash
+bash scripts/wave-worktrees.sh verify module [MODULE]
+```
+Paste the complete output. All ✓ → skip to STEP 2. Any ✗ → run
+`bash scripts/wave-worktrees.sh provision "$(pwd)" [MODULE]`, re-run verify,
+paste again; still failing → hard stop (report the ✗ lines; do not proceed).
+If it prints some OTHER module's `-window` branch: hard stop — this window is
+scoped to a different module's worktree. Open a new window for [MODULE] instead.
+
+**B. STAGED-WORK GUARD.** `git diff --cached` inspects the index of the
+checkout this window is currently sitting in — the paste must name which
+checkout that is. Run:
+```bash
+git rev-parse --show-toplevel   # names WHICH checkout's index is inspected
+git diff --cached --name-only
+```
+(Step A already diverted windows on a `-window` branch, so this checkout must
+be the main one. Confirm mechanically — no eyeballing paths:
+```bash
+[ "$(git rev-parse --absolute-git-dir)" = "$(git rev-parse --path-format=absolute --git-common-dir)" ] && echo MAIN || echo WORKTREE
+```
+It must print MAIN; if it prints WORKTREE, stop: this window must not run
+scope from inside a worktree it did not claim via step A.)
+- If any staged path is inside THIS module's registry paths → **hard stop**:
+  "✗ Staged [MODULE] changes exist in the main index. A worktree branched from
+  HEAD would not contain them, and the merge back is guaranteed to conflict.
+  Land or unstage that work first. This is a hard stop."
+- If staged paths exist but all belong to OTHER modules: print the list, name
+  which module(s) they map to, and require Max to type `ack` before continuing:
+  "A NEW worktree branches from HEAD (not the index), so those staged changes
+  won't leak in — but a REUSED module worktree may be BEHIND main: `single`
+  prints a 'behind main' warning with the exact catch-up command
+  (`git -C [WT_PATH] merge main`) — run it before working. Either way this
+  window must never touch the main index. Type `ack` to continue."
+- If nothing is staged: continue silently.
+
+**C. Create/enter the worktree (script-owned; missing script = hard stop):**
+If `scripts/wave-worktrees.sh` does not exist, print the same "NOT FOUND" hard
+stop as /advance (install from claude-dev-team, run its test suite) and stop.
+```bash
+bash scripts/wave-worktrees.sh single [MODULE]
+```
+Parse the `WAVE_WT` TSV line VERBATIM → WT_PATH (field 3). Then:
+```bash
+cd [WT_PATH]
+pwd                                  # must print WT_PATH exactly
+git rev-parse --abbrev-ref HEAD      # must print [MODULE]-window exactly
+bash scripts/wave-worktrees.sh verify module [MODULE]
+```
+Paste all four outputs. Any mismatch, ✗ line, or VERIFY FAIL → TOYOTA hard
+stop: do not proceed to STEP 2; fix the root cause (the refusal/failure output
+names it) and re-run STEP 1.5.
 
 ---
 
@@ -177,14 +254,26 @@ If file doesn't exist: note "No task file yet — run /scan to generate one."
 
 ## STEP 3 — Write persistence file and print scope banner
 
-First, write the active module file so parallel windows and long sessions can inherit MODULE:
+First, persist this checkout's module identity (per-checkout marker — NOT the
+old shared last-writer-wins file, which let one window silently clobber
+another's identity):
 ```bash
-mkdir -p .autocode/modules
-echo "[module]" > .autocode/modules/.active-module
+bash scripts/wave-worktrees.sh set-module [module]
+bash scripts/wave-worktrees.sh get-module
 ```
-(Replace `[module]` with the actual module name — lowercase, no whitespace.)
+Paste the get-module output — it must print `[module]` exactly (read-back proof).
 
-Print: `  Active module file: .autocode/modules/.active-module written`
+Back-compat: ONLY if this session is somehow still in the main checkout
+(STEP 1.5 normally prevents this), also write the legacy file so older
+commands keep resolving:
+```bash
+[ "$(git rev-parse --absolute-git-dir)" = "$(git rev-parse --path-format=absolute --git-common-dir)" ] \
+  && mkdir -p .autocode/modules && echo "[module]" > .autocode/modules/.active-module || true
+```
+Never write the legacy `.autocode/modules/.active-module` from inside a module
+worktree — that is the exact clobber this design removes.
+
+Print: `  Module marker written: $(git rev-parse --absolute-git-dir)/active-module`
 
 ── Pool Integration ──
 

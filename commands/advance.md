@@ -10,8 +10,9 @@ This command analyzes the task list, groups open tasks into parallel streams, pr
 
 **How MODULE is determined (check in this order):**
 1. If a `/scope [module]` banner was printed in this session's conversation context: use that module name.
-2. Else if `.autocode/modules/.active-module` exists: read its content (one line, trimmed) as MODULE.
-3. Else: MODULE is unset — use global paths throughout.
+2. Else if `$(git rev-parse --absolute-git-dir)/active-module` exists: read its content (one line, trimmed) as MODULE. (Per-checkout marker — each worktree resolves its own module; written by /scope via wave-worktrees.sh set-module.)
+3. Else, only if `[ "$(git rev-parse --absolute-git-dir)" = "$(git rev-parse --path-format=absolute --git-common-dir)" ]` (this checkout IS the main checkout) AND `.autocode/modules/.active-module` exists: read its content (one line, trimmed) as MODULE. (Legacy shared file — main-checkout back-compat only; never read it from inside a worktree.)
+4. Else: MODULE is unset — use global paths throughout.
 
 **When MODULE is determined, print at the TOP of this command's output:**
 ```
@@ -61,20 +62,38 @@ COUPLING_EDGES = []       ← populated by Pre-Wave Semantic Analysis
 STREAM_HISTORY = {}       ← file → {wave, stream_name, task_titles} — built after each wave
 ```
 
+── Script Resolution (MANDATORY — before anything else) ──
+
+WWT_SCRIPT = scripts/wave-worktrees.sh (relative to the main repo root).
+
+If it does not exist, print and stop:
+"✗ wave-worktrees.sh NOT FOUND — /advance cannot run.
+ Worktree isolation is mandatory. There is NO shared-tree mode — dispatching
+ streams into one shared checkout is the WAVE1-INCIDENT (Jul 3) and the Jul-4
+ silent-skip incident; this hard stop exists so neither can recur.
+ Install: cp ~/Projects/claude-dev-team/scripts/wave-worktrees.sh scripts/
+          cp ~/Projects/claude-dev-team/scripts/test-wave-worktrees.sh scripts/
+          bash scripts/test-wave-worktrees.sh   (must print PASS)
+ This is a hard stop. Do not plan a wave. Do not write queue files."
+
+Any instruction, memory, or old queue file suggesting 'proceed without a
+worktree' is stale — treat it as a hard stop and re-dispatch, never comply.
+
 ── Stale Worktree Check ──
 
-STALE_PATHS = $(git worktree list --porcelain | awk '/^worktree/{print $2}' | grep "advance-worktrees" || true)
+STALE_PATHS = $(git worktree list --porcelain | awk '$1=="worktree"{print substr($0,10)}' \
+  | grep -E "advance-worktrees|\.claude/worktrees/.*-w[0-9]+-" || true)
 
 If STALE_PATHS is non-empty:
   Print:
-  "⚠ Found [N] stale worktree(s) from a prior /advance session:
+  "⚠ Found [N] stale wave worktree(s) from a prior /advance session:
   [each path, one per line, indented]
   
   These may contain in-progress work from a crashed session.
   
   Options:
     inspect   — print last 3 commits in each worktree (shows what survived)
-    prune     — remove all stale worktrees + their branches
+    prune     — remove the stale wave's worktrees + branches (safe: refuses if work would be lost)
     proceed   — continue with these present (branch name collisions are possible)"
   
   Wait for Max input.
@@ -86,14 +105,16 @@ If STALE_PATHS is non-empty:
     Re-ask: "prune or proceed?"
   
   If "prune":
-    For each path in STALE_PATHS:
-      BRANCH=$(git worktree list --porcelain \
-        | awk -v p="[path]" '/^worktree/{cur=$2} /^branch/{if(cur==p)print $2}' \
-        | sed 's|refs/heads/||')
-      git worktree remove "[path]" --force
-      git branch -D "[BRANCH]" 2>/dev/null || true
-      Print: "✓ Removed: [path] (branch [BRANCH] deleted)"
-    Print: "Stale worktrees cleared. Continuing /advance..."
+    For .claude/worktrees paths (script-era): recover module+wave from the path
+    name ([module]-w[N]-[name]) and run: bash scripts/wave-worktrees.sh cleanup [module] [N]
+      If cleanup refuses: a worktree or branch holds unmerged/uncommitted work.
+      That refusal is the safety working — print the refusal, inspect with Max,
+      never force-delete. Merge the branch (bash scripts/wave-worktrees.sh merge [module] [N])
+      or resolve manually, then re-run cleanup.
+    For legacy /tmp/advance-worktrees paths (pre-migration): remove manually with
+      git worktree remove "[path]"   (no --force; if it refuses, inspect first)
+      git branch -d "[branch]"       (refuses unmerged — inspect with Max, never -D)
+    Print: "✓ Stale worktrees cleared. Continuing /advance..."
   
   If "proceed":
     Print: "⚠ Proceeding with [N] stale worktrees. Branch collisions possible."
@@ -102,7 +123,8 @@ If STALE_PATHS is non-empty:
 
 STATE_FILE_PATH:
   If MODULE is set: .autocode/modules/[MODULE]/.wave-state.json
-  Else: .autocode/.wave-state.json
+  Else: .autocode/modules/global/.wave-state.json
+(wave-worktrees.sh owns writing this file; the prose only reads it here.)
 
 If STATE_FILE_PATH exists from a prior crashed session:
   Read: PRIOR_WAVE_STATE = json contents of STATE_FILE_PATH
@@ -114,11 +136,22 @@ If STATE_FILE_PATH exists from a prior crashed session:
     [for each stream in PRIOR_WAVE_STATE.streams: "  Stream [X] → [worktree] (branch [branch])"]
     
     Options:
-      restore   — reuse these worktrees and skip W.3 creation (continue from crash point)
+      restore   — reuse these worktrees; skip ONLY worktree creation (continue from crash point)
       discard   — delete state file and start fresh with new worktrees"
     
     Wait for Max input.
-    If "restore": load STREAM_WORKTREE[X] and STREAM_BRANCH[X] from state file; skip W.3.
+    If "restore": load STREAM_WORKTREE[X] and STREAM_BRANCH[X] from the state
+    file, and skip ONLY the `bash scripts/wave-worktrees.sh create` call in
+    W.3. Every other W.3 obligation applies unchanged to a restored wave —
+    "a wave with no pasted verify output is an INVALID wave" makes no
+    exception for restores:
+      1. Run MECHANICAL VERIFY exactly as written in W.3
+         (bash scripts/wave-worktrees.sh verify wave [MODULE_SLUG] [WAVE_NUM])
+         and paste the COMPLETE output; its hard-stop conditions apply unchanged.
+      2. Re-write any queue file that is missing or lacks worktree:/branch:
+         frontmatter, using the worktree/branch values from the state file
+         (regenerate the brief body per W.3 if the brief file is also gone).
+      3. Run the QUEUE FRONTMATTER RECHECK and paste its output before W.4.
     If "discard": delete STATE_FILE_PATH; proceed normally through W.3.
 
 Print: "Starting /advance on Batch [BATCH_NUM] — [BATCH_OPEN_TOTAL] open tasks."
@@ -295,7 +328,7 @@ If any overlap: merge the conflicting streams. Re-validate. Repeat until clean.
 
 
 ─────────────────────────────────────────────────────────
-Step W.2 — Present wave plan (PLAN GATE)
+Step W.2 — Present wave plan (PLAN SUMMARY — informational, printed before W.3)
 ─────────────────────────────────────────────────────────
 
 Build DEFERRED_DISPLAY: for each DEFERRED task, find which STREAM (if any) contains its blocker.
@@ -333,7 +366,10 @@ Rules for this output:
 - Rationale is mandatory — one sentence per stream, never omit.
 - The Wave [N-1] closed line only appears when WAVE_NUM ≥ 2.
 
-After printing the plan, proceed directly to Step W.3. No approval needed.
+After printing the plan, proceed directly to Step W.3. No approval is needed
+for the plan print itself — the approval boundary is the terminal-window guide
+in W.4: Max physically opening the worker windows after MECHANICAL VERIFY is
+the approval act.
 
 
 ─────────────────────────────────────────────────────────
@@ -361,73 +397,84 @@ has only [len(WORKER_NAMES)] workers in pool. To restore full parallelism: run
 `/scope clear`, then `/scope [MODULE] [N]` to claim more workers.
 ```
 
-── WORKTREE CREATION ──
+── WORKTREE CREATION (delegated to wave-worktrees.sh) ──
 
 ⚠ ANTI-DRIFT NOTE: STREAM_WORKTREE and STREAM_BRANCH are per-stream variables.
 Each stream gets a DIFFERENT path and branch. The X in STREAM_WORKTREE[X] is the
 stream letter (A, B, C, D). Do not reuse a single variable for all streams.
 
 CORRECT:
-  Stream A → /tmp/advance-worktrees/scheduling-w2-a
-  Stream B → /tmp/advance-worktrees/scheduling-w2-b
+  Stream A → .claude/worktrees/harness/scheduling-w2-mike
+  Stream B → .claude/worktrees/harness/scheduling-w2-nathan
 WRONG (anti-pattern — all streams share same worktree):
-  All streams → /tmp/advance-worktrees/scheduling-w2-a
+  All streams → .claude/worktrees/harness/scheduling-w2-mike
 
-MAIN_REPO_ABS = $(git rev-parse --show-toplevel)
-SHORT_SHA = $(git rev-parse --short HEAD)
-mkdir -p /tmp/advance-worktrees
+MODULE_SLUG = MODULE (lowercase) if set, else "global"
 
-For each active STREAM W[WAVE_NUM][X]:
-  MODULE_SLUG = MODULE (lowercase) if set, else "global"
-  X_LOWER = stream letter in lowercase (a/b/c/d)
-  BRANCH_NAME = advance/[MODULE_SLUG]-w[WAVE_NUM]-[X_LOWER]-[SHORT_SHA]
-  WORKTREE_PATH = /tmp/advance-worktrees/[MODULE_SLUG]-w[WAVE_NUM]-[X_LOWER]
-  
-  Run: git worktree add "[WORKTREE_PATH]" -b "[BRANCH_NAME]"
-  
-  ── TOYOTA STOP & FIX — if git worktree add exits non-zero ──
-  Print:
-  "✗ WORKTREE CREATION FAILED — Stream [X]
-   Command: git worktree add [WORKTREE_PATH] -b [BRANCH_NAME]
-   Error: [captured stderr]
-   
-   Common causes:
-   1. Branch [BRANCH_NAME] already exists (stale from prior crash).
-      Fix: git branch -D [BRANCH_NAME]  then re-run /advance
-   2. /tmp/advance-worktrees/ not writable.
-      Fix: mkdir -p /tmp/advance-worktrees && chmod 755 /tmp/advance-worktrees
-   3. Unclean working tree preventing checkout.
-      Fix: git status — resolve any conflicts or stash changes.
-   
-   This is a hard stop. Do NOT open worker windows.
-   Return to Wait state. Fix the root cause. Re-run /advance."
-  Stop. This is a hard stop — do not proceed to W.4.
-  ── end TOYOTA STOP ──
-  
-  Set up .autocode symlink so suite commands work from worktree CWD:
-    mkdir -p "[MAIN_REPO_ABS]/.autocode"   ← must run FIRST; prevents dangling symlink
-    rm -rf "[WORKTREE_PATH]/.autocode"
-    ln -sf "[MAIN_REPO_ABS]/.autocode" "[WORKTREE_PATH]/.autocode"
-  
-  Record per-stream:
-    STREAM_WORKTREE[X] = WORKTREE_PATH     ← these are DIFFERENT for each X
-    STREAM_BRANCH[X] = BRANCH_NAME         ← these are DIFFERENT for each X
+Run exactly (one call, all streams — runnable from any checkout; the script operates on the main checkout itself):
+  bash scripts/wave-worktrees.sh create [MODULE_SLUG] [WAVE_NUM] \
+    [WORKER_NAMES[0]]:W[WAVE_NUM]A [WORKER_NAMES[1]]:W[WAVE_NUM]B [...one name:SID pair per active stream]
 
-Persist to state file (so W.5d can recover if orchestrator session is interrupted):
-  Write STATE_FILE_PATH (json):
-  {
-    "wave": [WAVE_NUM],
-    "short_sha": "[SHORT_SHA]",
-    "streams": {
-      "A": { "worktree": "[STREAM_WORKTREE[A]]", "branch": "[STREAM_BRANCH[A]]" },
-      "B": { "worktree": "[STREAM_WORKTREE[B]]", "branch": "[STREAM_BRANCH[B]]" },
-      [etc. for each active stream]
-    }
-  }
-  Print: "✓ Wave state persisted to [STATE_FILE_PATH]"
+If create's output contains a `WARN:` line, print it to Max verbatim before
+proceeding. (The WARN — e.g. dirty tracked files in main that will NOT appear
+in the worktrees — is emitted by `create` only; `verify` never re-emits it.)
+
+The script creates each worktree under .claude/worktrees/harness/, arms the pre-commit
+hooks (.husky/_ copy + pnpm install, hard-verified), copies env files, symlinks
+.autocode with a skip-worktree index guard, writes the per-checkout module
+marker, and persists .wave-state.json itself. The prose does NOT run any git
+worktree/branch commands — the script owns the lifecycle.
+
+Parse the script's stdout VERBATIM. Each stream emits one machine line:
+  WAVE_WT<TAB><name><TAB><absolute worktree path><TAB><branch>
+For each line, map name → stream letter via STREAM_WORKER_MAP and record:
+  STREAM_WORKTREE[X] = field 3 of that stream's WAVE_WT line
+  STREAM_BRANCH[X]   = field 4 of that stream's WAVE_WT line
+NEVER construct a path or branch name yourself. If any expected WAVE_WT line
+is missing or cannot be parsed, that is a TOYOTA STOP — do not guess, do not
+proceed to briefs.
+
+── TOYOTA STOP & FIX — if create exits non-zero ──
+Print:
+"✗ WORKTREE CREATION FAILED
+ Command: [the exact create command]
+ Error: [captured stderr]
+
+ Common causes:
+ 1. Stale worktree/branch from a prior crash → run: bash scripts/wave-worktrees.sh cleanup [MODULE_SLUG] [prior-wave-N]
+    If cleanup refuses, a branch holds unmerged work — inspect with
+    `git log main..[branch]` and decide with Max. The refusal is the safety working.
+ 2. pnpm install failed (network/disk) → fix, then re-run /advance.
+ 3. Main checkout not on 'main' → the script requires it; switch back first.
+
+ This is a hard stop. Do NOT open worker windows.
+ Return to Wait state. Fix the root cause. Re-run /advance."
+Stop. This is a hard stop — do not proceed to W.4.
+── end TOYOTA STOP ──
+
+── MECHANICAL VERIFY — W.3 DOES NOT END UNTIL THIS PASSES ──
+
+Run exactly:
+  bash scripts/wave-worktrees.sh verify wave [MODULE_SLUG] [WAVE_NUM]
+
+Paste the COMPLETE output — every ✓/✗ line and every VERIFY PASS/FAIL summary
+line, verbatim — into this window before doing anything else.
+
+HARD STOP CONDITIONS (any one = TOYOTA STOP):
+  1. verify was not run, or its output was not pasted verbatim above.
+  2. Any output line contains ✗.
+  3. The command exited non-zero.
+On a hard stop: do NOT write queue files, do NOT print the terminal guide,
+do NOT open worker windows. Print "✗ WAVE VERIFY FAILED — stopping to fix the
+root cause." Fix, re-run create/verify, and proceed only on all-✓ + exit 0.
+
+A wave with no pasted verify output is an INVALID wave: if at any later step
+you notice the verify paste is missing from this session, stop immediately
+and return here. This block exists because on Jul 4 a wave was dispatched
+with the isolation steps silently skipped and nothing caught it.
 
 Print worktree summary:
-  "Worktrees created:
+  "Worktrees created (verified):
     Stream A → [STREAM_WORKTREE[A]] (branch: [STREAM_BRANCH[A]])
     Stream B → [STREAM_WORKTREE[B]] (branch: [STREAM_BRANCH[B]])
     [etc.]"
@@ -462,10 +509,16 @@ IDENTITY RULE — MANDATORY: End EVERY response with exactly this line, no excep
 ## Active Module
 MODULE: [MODULE]
 
-This window is scoped to the [MODULE] module. The file `.autocode/modules/.active-module`
-exists and contains "[MODULE]" — all suite commands (`/task`, `/audit`, `/tasks`, etc.)
-read this automatically via MODULE_CONTEXT and route all writes to `.autocode/modules/[MODULE]/`.
-You do not need to do anything special; this is informational so you know which module you're in.
+This window is scoped to the [MODULE] module. Your worktree carries its own
+per-checkout module marker: wave-worktrees.sh create wrote "[MODULE]" into
+your worktree's private git dir at $(git rev-parse --absolute-git-dir)/active-module.
+All suite commands (`/task`, `/audit`, `/tasks`, etc.) resolve that marker
+automatically (MODULE_CONTEXT step 2) and route all writes to
+`.autocode/modules/[MODULE]/`. Never read or write
+`.autocode/modules/.active-module` from this worktree — that legacy file is
+main-checkout back-compat only (MODULE_CONTEXT rule 3).
+Nothing to set up — the marker was written when your worktree was created;
+the one instruction above (leave the legacy file alone) is all there is to heed.
 [End of conditional MODULE block]
 
 ## WORKING DIRECTORY — MANDATORY FIRST STEP
@@ -484,7 +537,13 @@ work normally from your worktree CWD.
 
 The orchestrator merges your branch to main in W.5d after you report done.
 You do not need to git push or commit to main. The orchestrator handles it.
-If you want to preserve mid-task work: git add -A && git commit -m "wip: [description]"
+Do not push, do not merge, do not switch branches.
+If you want to preserve mid-task work:
+  git add -A -- . ':!.autocode' && git commit -m "wip: [description]"
+⚠ NEVER run a bare `git add -A` here — always append `-- . ':!.autocode'`.
+Your .autocode is a symlink to the main repo; staging it can commit tracked-file
+deletions that a later merge would sweep onto main (the merge refuses such
+branches, which would strand your whole stream).
 
 ⚠ If you skip the cd step and edit files from the repo root CWD, your changes land in
 the shared working tree and can be wiped by concurrent sessions. The cd is not optional.
@@ -574,6 +633,23 @@ Queue files written:
   .autocode/queue/[WORKER_NAMES[1]].md  — status: pending
   [etc. for each active stream]
 ```
+
+── QUEUE FRONTMATTER RECHECK (MANDATORY — before W.4) ──
+
+Run exactly (QUEUE_DIR = the queue directory used above; iterate ONLY this
+wave's workers — a stale pre-migration file for an idle worker is not this
+wave's problem and its "fix from WAVE_WT values" recovery would not apply):
+  for name in [the worker name of each ACTIVE stream this wave, space-separated
+  — NOT the full roster: streams can be fewer than workers, and an idle
+  worker has no queue file this wave]; do q="[QUEUE_DIR]/$name.md"; printf '%s: ' "$q"; \
+    grep -q '^worktree: /' "$q" && grep -q '^branch: ' "$q" && echo OK || echo MISSING; done
+
+Paste the full output. Any MISSING line is a TOYOTA STOP: rewrite that queue
+file's frontmatter from the parsed WAVE_WT values and re-run this recheck.
+Never print the terminal guide while any queue file lacks worktree:/branch:.
+This recheck exists because on Jul 4 a wave was dispatched with
+prose-specified-but-never-written frontmatter and nothing caught it — /go now
+hard-stops on such files, so a wave that skips this recheck strands every worker.
 
 Proceed to Step W.4.
 
@@ -748,82 +824,101 @@ Sub-step W.5d — Merge stream branches and remove worktrees
 Context: W.5a-c already applied COMPLETE statuses, debt, and carry-forwards from
 .autocode/ (which landed in the main repo via the .autocode/ symlink during the wave).
 This step merges the actual source code changes from each stream's git branch, then cleans up.
+The merge/cleanup script calls below are runnable from ANY checkout, including
+this window's module worktree — the script operates on the main checkout itself.
 
 Load STREAM_WORKTREE[X] and STREAM_BRANCH[X]:
   If in-memory values are set (no session interruption): use them.
-  Else: read from STATE_FILE_PATH (the .wave-state.json written in W.3).
+  Else: read from STATE_FILE_PATH (the .wave-state.json written by the script in W.3).
     If STATE_FILE_PATH is also missing: print:
     "✗ Cannot find stream state (.wave-state.json missing and in-memory state lost).
      Cannot merge stream branches. Streams may have uncommitted work at the paths
      listed in the 'worktree' fields of each queue file.
-     Check .autocode/modules/[MODULE]/queue/*.md for worktree paths.
-     Merge manually: git merge --no-ff [branch-name] for each stream."
+     Check .autocode/modules/[MODULE]/queue/*.md for worktree paths, then merge
+     with: bash scripts/wave-worktrees.sh merge [MODULE_SLUG] [WAVE_NUM] once state is restored."
     Skip W.5d. Continue to W.6 (the commit will include only .autocode/ changes).
 
-Process each STREAM W[WAVE_NUM][X] in sequence (not parallel — merges must not race):
+  Step 1 — Commit each stream's uncommitted work (in sequence):
+    For each STREAM W[WAVE_NUM][X] with a worktree record:
+      Run: git -C "[STREAM_WORKTREE[X]]" status --porcelain
+      If any output:
+        git -C "[STREAM_WORKTREE[X]]" add -A -- . ':!.autocode'
+        git -C "[STREAM_WORKTREE[X]]" commit -m "advance: stream [X] wave [WAVE_NUM] final commit"
+        Print: "✓ Stream [X]: committed remaining uncommitted work"
+      Else:
+        Print: "✓ Stream [X]: worktree clean (nothing to commit)"
+      Then check: git -C "[STREAM_WORKTREE[X]]" status --porcelain -- .autocode | grep -v '^??'
+      If non-empty: TOYOTA STOP — tracked .autocode paths are staged/modified in
+      this worktree. Do NOT merge; a branch carrying .autocode deletions would
+      destroy shared module state (the script's merge guard refuses it anyway).
+      Fix the index (git -C ... restore --staged .autocode) and re-run Step 1.
 
-  WORKTREE_PATH = STREAM_WORKTREE[X]
-  BRANCH_NAME = STREAM_BRANCH[X]
+  Step 2 — Merge all stream branches (script-owned; guards included):
+    Run exactly: bash scripts/wave-worktrees.sh merge [MODULE_SLUG] [WAVE_NUM]
+    Paste the COMPLETE output.
+    The script is two-pass: Pass 1 runs ALL guards before touching anything —
+    the staged-index guard on main, then EVERY stream's tracked-.autocode-deletion
+    guard — and dies before a single branch is merged if any guard fails.
+    Pass 2 merges each branch --no-ff, skips already-merged branches, and on a
+    true content conflict AUTO-ABORTS (it never auto-resolves); a failure that
+    is not a content conflict is labeled "NOT a content conflict" with main
+    left unchanged.
 
-  If WORKTREE_PATH is empty:
-    Print: "⚠ Stream [X] has no worktree record — skipping merge for this stream."
-    Continue.
-
-  Step 1 — Commit any uncommitted changes in the worktree:
-    Run: git -C "[WORKTREE_PATH]" status --porcelain
-    If any output:
-      git -C "[WORKTREE_PATH]" add -A
-      git -C "[WORKTREE_PATH]" commit -m "advance: stream [X] wave [WAVE_NUM] final commit"
-      Print: "✓ Stream [X]: committed remaining uncommitted work"
-    Else:
-      Print: "✓ Stream [X]: worktree clean (nothing to commit)"
-
-  Step 2 — Merge stream branch into main working tree:
-    TASK_TITLES = comma-joined titles of tasks closed by this stream
-    Run: git merge --no-ff "[BRANCH_NAME]" \
-           -m "Merge stream [X] (wave [WAVE_NUM], [STREAM_WORKER_MAP[X]]): [TASK_TITLES]"
-    
-    ── TOYOTA STOP & FIX — if git merge exits non-zero (CONFLICT) ──
+    ── TOYOTA STOP & FIX — if merge exits non-zero ──
+    If the failure is a CONFLICT (the script has already auto-aborted the merge;
+    main is clean; nothing is in progress):
     Print:
-    "✗ MERGE CONFLICT — Stream [X] → main branch (wave [WAVE_NUM])
-     
-     Conflicting files:
-     [git diff --name-only --diff-filter=U output]
+    "✗ MERGE CONFLICT — wave [WAVE_NUM] (script aborted the merge; main is clean)
      
      Root cause: W.1 should have ensured streams own disjoint files. A conflict means
      either (a) a worker edited a file outside their File: field, or (b) a carry-forward
      from a prior wave modified a file this stream also owns.
      
-     Resolution options:
-       resolve [X]-over  — keep stream [X] version for all conflicts
-       resolve main-over — keep current main version (discards stream [X] changes)
-       manual            — walk through each conflicting file one by one
-     
-     After resolution, type: continue-merge [X]
+     All resolution commands run against the MAIN checkout. This window sits in a
+     module worktree (scope.md requires it) — a bare `git merge` here would merge the
+     stream branch into [MODULE]-window, NOT main. Bind MAIN_ROOT and run the chosen
+     merge in the SAME Bash tool call (each Bash call is a fresh shell — a binding
+     from an earlier call does not survive):
+       MAIN_ROOT=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")
+
+     Resolution options (each names the exact command — run only what Max picks):
+       resolve stream-over — git -C "$MAIN_ROOT" merge --no-ff -X theirs [STREAM_BRANCH[X]] -m 'advance: wave [WAVE_NUM] stream [X] merge (stream-over)'
+                             (keeps the stream's side for conflicting hunks;
+                              non-conflicting changes from BOTH sides land)
+       resolve main-over   — git -C "$MAIN_ROOT" merge --no-ff -X ours [STREAM_BRANCH[X]] -m 'advance: wave [WAVE_NUM] stream [X] merge (main-over)'
+                             (keeps main's side for conflicting hunks ONLY;
+                              the stream's non-conflicting changes still land)
+       manual              — git -C "$MAIN_ROOT" merge --no-ff [STREAM_BRANCH[X]], then edit each
+                             conflicted file under $MAIN_ROOT, `git -C "$MAIN_ROOT" add` each
+                             resolved file, and finish with `git -C "$MAIN_ROOT" commit --no-edit`
+     Never offer or run `-s ours`: it records a merge while discarding EVERY
+     change on the stream branch — wholesale stream abandonment is a cleanup
+     decision made with Max, not a merge option.
      
      This is a hard stop. Do not merge the next stream until this one resolves.
-     Return to Wait state. Do not type 'continue-merge' until conflicts are resolved."
-    Wait for Max input. Handle resolution (git add + git commit --no-edit). Continue.
+     Return to Wait state."
+    Wait for Max input. Run exactly the chosen command, then re-run:
+    bash scripts/wave-worktrees.sh merge [MODULE_SLUG] [WAVE_NUM]
+    (the script skips already-merged branches, so re-running merges only the rest).
+    If the failure is the staged-index guard or the .autocode-deletion guard:
+    that refusal is the safety working — print it, resolve the underlying state
+    with Max, never work around the guard.
+    If the failure is labeled "NOT a content conflict": main is unchanged and no
+    merge is in progress — read the git output above the label, fix the named
+    condition, and re-run the merge command.
     ── end TOYOTA STOP ──
     
-    Print: "✓ Stream [X] merged (branch: [BRANCH_NAME])"
+    Print: "✓ All wave [WAVE_NUM] stream branches merged."
 
-  Step 3 — Remove worktree and delete branch:
-    Run: git worktree remove "[WORKTREE_PATH]" --force
-    Run: git branch -D "[BRANCH_NAME]"
-    Note: use -D (force) not -d — the branch is now merged but -d is overly strict.
-    Print: "✓ Worktree removed: [WORKTREE_PATH]. Branch [BRANCH_NAME] deleted."
-
-After all streams processed:
-  Delete state file: rm -f [STATE_FILE_PATH]
-  
-  Run: git worktree list
-  Print with label: "Active worktrees after cleanup:"
-  COUNT = number of lines in git worktree list output
-  If COUNT > 1:
-    Print: "⚠ [COUNT-1] extra worktree(s) still active. Run: git worktree prune"
-  Else:
-    Print: "✓ Clean — only main worktree active."
+  Step 3 — Remove worktrees and delete branches (script-owned; refuse-if-work-lost):
+    Run exactly: bash scripts/wave-worktrees.sh cleanup [MODULE_SLUG] [WAVE_NUM]
+    Paste the COMPLETE output.
+    Branch deletion uses refuse-if-unmerged semantics (never force-delete). If
+    cleanup refuses, a worktree holds uncommitted work or a branch holds unmerged
+    commits — that refusal is the safety working: inspect with Max
+    (git log main..[branch]), merge or recover the work, then re-run cleanup.
+    The script also deletes the state file and prints the remaining worktree list;
+    verify only the main checkout and module windows remain.
 
 ─────────────────────────────────────────────────────────
 Step W.6 — Commit wave and loop back (COMMIT GATE)
@@ -852,7 +947,7 @@ On "yes":
   ```
   /advance wave [WAVE_NUM]: close [WAVE_TASKS_CLOSED] tasks, [WAVE_STREAMS] streams (Batch [BATCH_NUM])
 
-  Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+  Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
   ```
   After commit: run `git rev-parse --short HEAD` → SHORT_SHA
 
@@ -972,7 +1067,7 @@ Stop.
 - Pre-populate each stream's tasks.md with its task blocks before printing the terminal guide (W.4a)
 - Carry-forward task numbers are assigned by this orchestrator during consolidation (W.5c)
 - DEFERRED tasks never enter union-find — only CANDIDATES are clustered
-- Every wave requires a PLAN GATE — no windows open without Max's approval
+- Every wave prints a PLAN SUMMARY before W.3 (informational); the approval boundary is the terminal-window guide — no work starts until Max physically opens the worker windows after MECHANICAL VERIFY
 - Each wave commits independently (W.6) before looping — never accumulate changes across waves
 - Sequential Handoff must list DEFERRED in dependency order (Pass 1/2/3 algorithm)
 - Never auto-start /task after Sequential Handoff or Batch Complete — Max decides
