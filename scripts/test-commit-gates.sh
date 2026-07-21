@@ -67,6 +67,15 @@ assert_contains() {
   fi
 }
 
+assert_not_contains() {
+  TESTS_RUN=$((TESTS_RUN+1))
+  if echo "$1" | grep -q "$2"; then
+    echo "  ✗ $3 — output unexpectedly contains '$2'"; FAIL=1
+  else
+    echo "  ✓ $3"; TESTS_PASS=$((TESTS_PASS+1))
+  fi
+}
+
 # Fixture: a repo whose index holds the gate scripts, the hook itself, a
 # source file, a test file, a gate-script stand-in, and a harness command
 # stand-in. Everything is committed; each test stages exactly one change.
@@ -230,6 +239,115 @@ assert_eq "$(echo "$OUT" | head -1)" "FULL" "C10: rename of harness prose classi
 run_in "$G7" sh -e .husky/pre-commit
 assert_false "[ $RC -eq 0 ]" "C11a: hook blocks the harness-command rename"
 assert_contains "$OUT" "staged deletion of harness command" "C11b: rename surfaces as the harness-deletion hard block"
+
+echo ""
+echo "Group 6: CMS org-scoping gate wiring (Task #7)"
+
+# A fixture whose index carries the CMS gate, the FFF-gate scripts, the hook,
+# and one committed CLEAN cms route. Each test stages exactly one route
+# change and drives the real hook. Kept separate from gate_fixture (whose
+# comment forbids coupling it to new concerns).
+cms_gate_fixture() {
+  local d; d=$(mktemp -d)
+  git -C "$d" init --quiet -b main
+  git -C "$d" config user.email "test@gates.test"
+  git -C "$d" config user.name "Gate Test"
+  mkdir -p "$d/scripts" "$d/.husky" "$d/apps/web/src/app/api/cms/clean"
+  cp "$SCRIPTS_DIR/classify-diff-size.sh" "$d/scripts/classify-diff-size.sh"
+  cp "$SCRIPTS_DIR/staged-diff-hash.sh" "$d/scripts/staged-diff-hash.sh"
+  cp "$SCRIPTS_DIR/cms-org-scoping-gate.sh" "$d/scripts/cms-org-scoping-gate.sh"
+  cp "$SCRIPTS_DIR/cms-scope-check.pl" "$d/scripts/cms-scope-check.pl"
+  cp "$HOOK_SRC" "$d/.husky/pre-commit"
+  cat > "$d/apps/web/src/app/api/cms/clean/route.ts" << 'ROUTE'
+import { getTenantContext } from '@/lib/tenant-context';
+export async function GET() {
+  const { db, organization } = await getTenantContext(session);
+  const rows = await db.cmsArtifact.findMany({ where: { organizationId: organization.id } });
+  return rows;
+}
+ROUTE
+  git -C "$d" add -A >/dev/null 2>&1
+  git -C "$d" commit -q -m "initial" >/dev/null 2>&1
+  echo "$d"
+}
+
+# C12 — staging an UNSCOPED cms route makes the hook's CMS gate fire.
+# (The FFF gate also blocks on the missing artifact; we assert the CMS
+# gate's own message so this proves the CMS wiring, not just any block.)
+G8=$(cms_gate_fixture); FIXTURES+=("$G8")
+mkdir -p "$G8/apps/web/src/app/api/cms/leak"
+cat > "$G8/apps/web/src/app/api/cms/leak/route.ts" << 'ROUTE'
+import { getTenantContext } from '@/lib/tenant-context';
+export async function GET() {
+  const { db } = await getTenantContext(session);
+  const views = await db.cmsView.findMany({ where: { status: 'VERIFIED' } });
+  return views;
+}
+ROUTE
+git -C "$G8" add apps/web/src/app/api/cms/leak/route.ts >/dev/null 2>&1
+run_in "$G8" sh -e .husky/pre-commit
+assert_false "[ $RC -eq 0 ]" "C12a: hook blocks a commit staging an unscoped cms route"
+assert_contains "$OUT" "CMS ORG-SCOPING GATE FAILED" "C12b: the CMS gate names the IDOR-class failure"
+
+# C13 — a CLEAN cms route change does NOT trip the CMS gate. The commit may
+# still block on the FFF artifact, but the CMS gate's own failure line must
+# be ABSENT — the gate never false-positives on scoped code.
+G9=$(cms_gate_fixture); FIXTURES+=("$G9")
+cat > "$G9/apps/web/src/app/api/cms/clean/route.ts" << 'ROUTE'
+import { getTenantContext } from '@/lib/tenant-context';
+export async function GET() {
+  const { db, organization } = await getTenantContext(session);
+  const rows = await db.cmsArtifact.findMany({ where: { organizationId: organization.id, status: 'VERIFIED' } });
+  return rows;
+}
+ROUTE
+git -C "$G9" add apps/web/src/app/api/cms/clean/route.ts >/dev/null 2>&1
+run_in "$G9" sh -e .husky/pre-commit
+assert_not_contains "$OUT" "CMS ORG-SCOPING GATE FAILED" "C13: the CMS gate stays silent on a scoped route"
+
+# C14 — CMS route staged but the gate script ABSENT from the index is a hard
+# block (a swallowed security gate is a disabled one), never a silent skip.
+G10=$(cms_gate_fixture); FIXTURES+=("$G10")
+git -C "$G10" rm -q --cached scripts/cms-org-scoping-gate.sh >/dev/null 2>&1
+mkdir -p "$G10/apps/web/src/app/api/cms/x"
+printf 'export async function GET() { return 1; }\n' > "$G10/apps/web/src/app/api/cms/x/route.ts"
+git -C "$G10" add apps/web/src/app/api/cms/x/route.ts >/dev/null 2>&1
+run_in "$G10" sh -e .husky/pre-commit
+assert_false "[ $RC -eq 0 ]" "C14a: hook blocks when the CMS gate is missing from the index"
+assert_contains "$OUT" "CMS ORG-SCOPING GATE MISSING FROM INDEX" "C14b: the block names the missing gate script"
+
+# C15 — the where-clause analyzer absent from the index is the same hard block
+# (the gate can't judge scope without it).
+G10b=$(cms_gate_fixture); FIXTURES+=("$G10b")
+git -C "$G10b" rm -q --cached scripts/cms-scope-check.pl >/dev/null 2>&1
+mkdir -p "$G10b/apps/web/src/app/api/cms/y"
+printf 'export async function GET() { return 1; }\n' > "$G10b/apps/web/src/app/api/cms/y/route.ts"
+git -C "$G10b" add apps/web/src/app/api/cms/y/route.ts >/dev/null 2>&1
+run_in "$G10b" sh -e .husky/pre-commit
+assert_false "[ $RC -eq 0 ]" "C15a: hook blocks when the where-clause analyzer is missing from the index"
+assert_contains "$OUT" "cms-scope-check.pl" "C15b: the block names the missing analyzer"
+
+# C16 — the crux of the design: the gate judges the INDEX, not the working
+# tree. Stage a clean route, then GUT the gate in the WORKING TREE; the
+# index-mirrored gate must still be the real one (a clean route still passes,
+# proving the working-tree copy was ignored — the inverse of the FFF gate's
+# C9, applied to the CMS gate).
+G11=$(cms_gate_fixture); FIXTURES+=("$G11")
+mkdir -p "$G11/apps/web/src/app/api/cms/leak2"
+# An UNSCOPED route staged into the index...
+cat > "$G11/apps/web/src/app/api/cms/leak2/route.ts" << 'ROUTE'
+import { getTenantContext } from '@/lib/tenant-context';
+export async function GET() {
+  const { db } = await getTenantContext(session);
+  return db.cmsView.findMany({ where: { status: 'VERIFIED' } });
+}
+ROUTE
+git -C "$G11" add apps/web/src/app/api/cms/leak2/route.ts >/dev/null 2>&1
+# ...while the WORKING-TREE gate is neutered to always pass.
+printf '#!/usr/bin/env bash\necho "GATE PASSED"\nexit 0\n' > "$G11/scripts/cms-org-scoping-gate.sh"
+run_in "$G11" sh -e .husky/pre-commit
+assert_false "[ $RC -eq 0 ]" "C16a: a gutted working-tree gate does not weaken the commit (index copy runs)"
+assert_contains "$OUT" "CMS ORG-SCOPING GATE FAILED" "C16b: the index-mirrored gate caught the staged IDOR"
 
 echo ""
 echo "RESULTS: $TESTS_PASS/$TESTS_RUN passed"

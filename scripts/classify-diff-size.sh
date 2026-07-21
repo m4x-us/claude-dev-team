@@ -72,11 +72,24 @@ FILE_COUNT=$(echo "$SOURCE_FILES" | grep -c . || true)
 # of file count.
 SENSITIVE_MATCH=$(echo "$SOURCE_FILES" | grep -iE '(^|/)(auth|security|payment|stripe|refund|password|credential|permission|scheduling-auth|role)([-./]|$)' || true)
 
+# CMS API routes are a multi-tenant boundary where organizationId row-scoping
+# is the ONLY isolation (all orgs share one physical DB). The keyword regex
+# above does not catch them by path, so the CMS-5 slots IDOR diff classified
+# DIRECT and got only a lightweight FFF pass (W1C finding). Any api/cms route
+# change is FULL-tier — the exact class this classifier exists to escalate.
+CMS_API_MATCH=$(echo "$SOURCE_FILES" | grep -E '^apps/web/src/app/api/cms/.*route\.(ts|tsx)$' || true)
+
 PACKAGE_MATCH=$(echo "$SOURCE_FILES" | grep -E '^packages/' || true)
 
 if [ -n "$SENSITIVE_MATCH" ]; then
   echo "FULL"
   echo "Security/money-sensitive path staged: $(echo "$SENSITIVE_MATCH" | head -1)"
+  exit 0
+fi
+
+if [ -n "$CMS_API_MATCH" ]; then
+  echo "FULL"
+  echo "CMS API route staged (multi-tenant boundary — see CMS-5): $(echo "$CMS_API_MATCH" | head -1)"
   exit 0
 fi
 
