@@ -295,6 +295,114 @@ else
     || { echo "✗ scan.md — Rule 16 lacks the .not.-strip step (.not.toBeNull() satisfies the allowed list → pseudocode assertions pass the scan)"; FAIL=1; }
 fi
 
+# CHECK 8c — single-canonical MODULE REGISTRY (added 2026-08-14): the fenced
+# registry lives ONLY in scope.md; scan.md and (project-only) 1701.md carry a
+# run-time pointer + RETIRED refusal instead of a copy. A re-embedded copy is
+# the drift class that produced the stale 11-module scan.md registry.
+echo ""
+echo "=== SINGLE-CANONICAL REGISTRY CHECK ==="
+# REG_SENTINEL is the first registry path line. One-way canary: its PRESENCE
+# in scan.md/1701.md proves an embedded copy; its absence there proves only
+# that this one line is gone. The positive half of the invariant is checked
+# below: scope.md itself MUST contain it (canonical body actually present).
+# Renaming the email module's dashboard/inbox path requires updating this
+# constant — acceptable canary cost.
+REG_SENTINEL='apps/web/src/app/dashboard/inbox'
+# resolve_cmd prefers the project copy (what actually runs here) and falls
+# back to the claude-dev-team CANON MIRROR — while runtime slash-command
+# fallback is ~/.claude/commands. The fallbacks diverging is by design: a
+# stale HOME copy is invisible to this check (that residual is debt.md
+# HARNESS-1, not this script's job). Fail-closed either way: a canon-resolved
+# scope.md missing the CANONICAL COPY or operative-refusal pins sets FAIL=1 —
+# it can never pass silently.
+SCOPE_MD=$(resolve_cmd scope.md)
+if [ ! -f "$SCOPE_MD" ]; then
+  echo "✗ scope.md unresolvable ($SCOPE_MD) — the CANONICAL registry cannot exist; every pointer dangles"; FAIL=1
+else
+  N_REG=$(grep -c '^## MODULE REGISTRY' "$SCOPE_MD" || true)
+  [ "${N_REG:-0}" -eq 1 ] \
+    && echo "✓ scope.md — exactly one MODULE REGISTRY header" \
+    || { echo "✗ scope.md — ${N_REG:-0} MODULE REGISTRY headers (need exactly 1)"; FAIL=1; }
+  grep -qF "$REG_SENTINEL" "$SCOPE_MD" \
+    && echo "✓ scope.md — canonical registry body present (sentinel path found)" \
+    || { echo "✗ scope.md — canonical registry body GUTTED ($REG_SENTINEL absent)"; FAIL=1; }
+  grep -qF 'CANONICAL COPY' "$SCOPE_MD" \
+    && echo "✓ scope.md — canonical-copy declaration present" \
+    || { echo "✗ scope.md — registry lacks the CANONICAL COPY declaration"; FAIL=1; }
+  # 'marked RETIRED is INVALID' matches twice by design (registry header +
+  # Step 1); the 'do not proceed to Step 1.5' pin anchors the operative copy.
+  grep -qF 'marked RETIRED is INVALID' "$SCOPE_MD" && grep -qF 'do not proceed to Step 1.5' "$SCOPE_MD" \
+    && echo "✓ scope.md — RETIRED refusal present (registry rule + operative Step 1 refusal)" \
+    || { echo "✗ scope.md — RETIRED refusal missing/defanged (need the registry header rule AND Step 1's operative 'do not proceed to Step 1.5')"; FAIL=1; }
+fi
+SCAN_MD=$(resolve_cmd scan.md)
+if [ ! -f "$SCAN_MD" ]; then
+  echo "✗ scan.md missing from project and canon (registry pointer unverifiable)"; FAIL=1
+else
+  if grep -qF "$REG_SENTINEL" "$SCAN_MD"; then
+    echo "✗ scan.md — embedded registry copy detected ($REG_SENTINEL) — must point to scope.md"; FAIL=1
+  else
+    echo "✓ scan.md — no embedded registry copy (sentinel)"
+  fi
+  if grep -qF 'packages/ordinatio-cms' "$SCAN_MD"; then
+    echo "✗ scan.md — embedded registry copy detected (packages/ordinatio-cms) — must point to scope.md"; FAIL=1
+  else
+    echo "✓ scan.md — no embedded registry copy (second canary)"
+  fi
+  grep -qF 'MODULE REGISTRY in scope.md' "$SCAN_MD" && grep -qF 'HARD STOP' "$SCAN_MD" \
+    && echo "✓ scan.md — registry pointer + HARD STOP present" \
+    || { echo "✗ scan.md — registry pointer/HARD STOP missing"; FAIL=1; }
+  grep -qF 'marked RETIRED in the registry' "$SCAN_MD" && grep -qF 'refuse, name the successor' "$SCAN_MD" \
+    && echo "✓ scan.md — operative RETIRED refusal present (Step 1 refuse-and-name-successor)" \
+    || { echo "✗ scan.md — operative RETIRED refusal missing (a bare RETIRED mention is not a refusal)"; FAIL=1; }
+fi
+S1701_MD="$PROJECT_ROOT/.claude/commands/1701.md"
+if [ -f "$S1701_MD" ]; then
+  if grep -qF "$REG_SENTINEL" "$S1701_MD"; then
+    echo "✗ 1701.md — embedded registry copy detected ($REG_SENTINEL) — must point to scope.md"; FAIL=1
+  else
+    echo "✓ 1701.md — no embedded registry copy (sentinel)"
+  fi
+  if grep -qF 'packages/ordinatio-cms' "$S1701_MD"; then
+    echo "✗ 1701.md — embedded registry copy detected (packages/ordinatio-cms) — must point to scope.md"; FAIL=1
+  else
+    echo "✓ 1701.md — no embedded registry copy (second canary)"
+  fi
+  grep -qF 'MODULE REGISTRY in scope.md' "$S1701_MD" && grep -qF 'HARD STOP' "$S1701_MD" \
+    && echo "✓ 1701.md — registry pointer + HARD STOP present" \
+    || { echo "✗ 1701.md — registry pointer/HARD STOP missing (dashboard would guess paths)"; FAIL=1; }
+  grep -q 'non-RETIRED' "$S1701_MD" \
+    && echo "✓ 1701.md — non-RETIRED iteration present" \
+    || { echo "✗ 1701.md — Step 1A lacks non-RETIRED filter (path-less entry → whole-repo git log)"; FAIL=1; }
+else
+  echo "⚠ SKIPPED: 1701.md (project-local command; not present in this checkout)"
+fi
+MASTER_MD="$PROJECT_ROOT/.claude/commands/master.md"
+if [ -f "$MASTER_MD" ]; then
+  if grep -qF "$REG_SENTINEL" "$MASTER_MD"; then
+    echo "✗ master.md — embedded registry copy detected ($REG_SENTINEL) — must point to scope.md"; FAIL=1
+  else
+    echo "✓ master.md — no embedded registry copy (sentinel)"
+  fi
+  # master's embedded copy (found 2026-08) OMITTED the sentinel path (its email line
+  # carried no dashboard/inbox), so REG_SENTINEL alone would never have caught
+  # it. Second canary: packages/ordinatio-cms — present in that copy's cms
+  # line, absent from master.md's pointer text and seam-reference prose.
+  if grep -qF 'packages/ordinatio-cms' "$MASTER_MD"; then
+    echo "✗ master.md — embedded registry copy detected (packages/ordinatio-cms) — must point to scope.md"; FAIL=1
+  else
+    echo "✓ master.md — no embedded registry copy (second canary)"
+  fi
+  grep -qF 'MODULE REGISTRY in scope.md' "$MASTER_MD" && grep -qF 'HARD STOP' "$MASTER_MD" \
+    && echo "✓ master.md — registry pointer + HARD STOP present" \
+    || { echo "✗ master.md — registry pointer/HARD STOP missing (findings routed by guesswork)"; FAIL=1; }
+  grep -qF 'INVALID routing target' "$MASTER_MD" \
+    && echo "✓ master.md — RETIRED routing refusal present (route to the successor)" \
+    || { echo "✗ master.md — RETIRED routing refusal missing (findings would land in a retired module's dead memory files)"; FAIL=1; }
+else
+  echo "⚠ SKIPPED: master.md (project-local command; not present in this checkout)"
+fi
+
 # CHECK 9 — advance.md uses WORKER_NAMES, no hardcoded A→Adam mapping
 echo ""
 echo "=== ADVANCE.MD DYNAMIC WORKER CHECK ==="

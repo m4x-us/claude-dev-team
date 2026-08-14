@@ -8,53 +8,30 @@ Call with `/scan [module]` from `/1701` or `/scope`, or just `/scan` if already 
 
 ## MODULE REGISTRY
 
-```
-email       apps/web/src/app/dashboard/inbox
-            apps/web/src/components/email
-            apps/web/src/lib/email
-            apps/web/src/app/api/email
-            packages/ordinatio-email
+The canonical registry lives in ONE place: the MODULE REGISTRY in scope.md.
+Resolve it the way slash commands resolve: `.claude/commands/scope.md` in this
+project if it exists, else `~/.claude/commands/scope.md` (the home command dir
+where install.sh places commands for non-project use — NOT the claude-dev-team
+mirror, which is a sync source, never resolved at run time). Read that fenced
+block at run time before Step 1.
 
-scheduling  apps/web/src/app/dashboard/scheduling
-            apps/web/src/components/scheduling
-            apps/web/src/app/api/scheduling
-            packages/ordinatio-scheduling
-            packages/ordinatio-booking-widget
-
-clients     apps/web/src/app/dashboard/clients
-            apps/web/src/app/api/clients
-
-orders      apps/web/src/app/dashboard/orders
-            apps/web/src/app/api/orders
-            apps/worker/src/consumers
-
-sms         apps/web/src/app/dashboard/texts
-            apps/web/src/app/api/sms
-
-cms         apps/web/src/app/dashboard/website
-            packages/ordinatio-cms
-
-agents      apps/web/src/app/api/agent
-            packages/ordinatio-agent
-
-auth        packages/ordinatio-auth
-            packages/ordinatio-security
-
-settings    apps/web/src/app/dashboard/settings
-            packages/ordinatio-settings
-
-worker      apps/worker/src
-
-ui          packages/ordinatio-ui
-            packages/ordinatio-errors
-            packages/ordinatio-activities
-```
+- HARD STOP if neither file exists or the fenced block is missing. Print:
+  "✗ No MODULE REGISTRY found — this project has no scope.md registry.
+   Install/repair the harness (claude-dev-team install.sh) or add the
+   registry to .claude/commands/scope.md." Do not guess paths.
+- Lines starting with `#` inside the block are annotations — never treat them
+  as paths when building path lists.
+- Entries marked RETIRED are invalid for /scan.
 
 ---
 
 ## STEP 1 — Identify module
 
 If `[module]` was passed, use it. If this window is already scoped (from `/scope`), use the active module. If neither, ask which module to scan.
+
+If the RESOLVED module — however it was resolved (argument, this window's
+active scope, or the prompt answer) — is marked RETIRED in the registry:
+refuse, name the successor from its annotation, and stop.
 
 ---
 

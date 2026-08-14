@@ -7,45 +7,90 @@ Sets this Claude Code window's identity to a specific System 1701 module. After 
 ## MODULE REGISTRY
 
 ```
+# CANONICAL COPY — this fenced block is the ONLY module registry; /1701,
+# /scan, and /master read it from this file at run time (pinned by
+# test-module-context.sh CHECK 8c). Lines starting with # are annotations, NEVER paths — skip them
+# when building path lists; path lines stay pure (they are substituted
+# verbatim into git log / find commands). An entry marked RETIRED is INVALID
+# for /scope, /scan, finding-routing, worktrees, and dashboards — refuse and name the
+# successor from its annotation. A path may appear under MORE THAN ONE entry
+# only when an annotation names who owns edits; blanket entries (worker =
+# apps/worker/src) overlap narrower ones by design — the most specific
+# annotated entry owns edits. A FILE-level path also covers its co-located
+# test files (same basename + .test.* in the same directory) — tests follow
+# their source's owner; never list them as separate path lines.
+
 email       apps/web/src/app/dashboard/inbox
             apps/web/src/components/email
             apps/web/src/lib/email
             apps/web/src/app/api/email
             packages/ordinatio-email
+            # api/email + packages/ordinatio-email: comms owns edits (the
+            # substrate engine); email keeps the product-UI surface. Never
+            # run email and comms windows in parallel on those two paths.
 
 scheduling  apps/web/src/app/dashboard/scheduling
             apps/web/src/components/scheduling
             apps/web/src/app/api/scheduling
             packages/ordinatio-scheduling
             packages/ordinatio-booking-widget
+            apps/worker/src/polling/calendar-sync-poller.ts
+            apps/worker/src/polling/notification-poller.ts
+            apps/worker/src/consumers/calendar-stream-consumer.ts
+            # Worker paths are FILE-level on purpose — those dirs are orders'
+            # (consumers/) and the worker blanket's; see their annotations.
 
 clients     apps/web/src/app/dashboard/clients
             apps/web/src/app/api/clients
 
 orders      apps/web/src/app/dashboard/orders
             apps/web/src/app/api/orders
+            apps/web/src/lib/worker
             apps/worker/src/consumers
+            apps/worker/src/polling/placement-poller.ts
+            # consumers/ is dir-level; comms owns sms-stream-consumer.ts,
+            # scheduling owns calendar-stream-consumer.ts. orders keeps
+            # stream-consumer-base.ts (shared Redis base — its ACK semantics
+            # bind both carved-out consumers; coordinate before changing it).
 
 sms         apps/web/src/app/dashboard/texts
             apps/web/src/app/api/sms
+            # api/sms: comms owns edits (substrate); sms = texts product UI —
+            # never run both windows in parallel on api/sms.
 
 cms         apps/web/src/app/dashboard/website
+            apps/web/src/app/api/cms
             packages/ordinatio-cms
 
-agents      apps/web/src/app/api/agent
-            packages/ordinatio-agent
+agents      RETIRED
+            # Superseded by alfred (2026-08-14): former paths
+            # (apps/web/src/app/api/agent, packages/ordinatio-agent) are a
+            # strict subset of alfred's. Never /scope, /scan, or worktree
+            # this name — use alfred.
 
 auth        packages/ordinatio-auth
             packages/ordinatio-security
 
 settings    apps/web/src/app/dashboard/settings
+            apps/web/src/app/api/settings
             packages/ordinatio-settings
 
 worker      apps/worker/src
+            # Blanket path. The most specific annotated entry owns edits;
+            # carve-outs (dir- or file-level) are listed as paths on their
+            # owners — vendor (api/, portal/, gocreate-status-map.ts), comms,
+            # scheduling, orders. polling/ and consumers/ are fully assigned
+            # except polling/scheduled-email-poller.ts (it stays with the
+            # blanket, along with its co-located test if one exists) — as does
+            # everything not carved anywhere (as of 2026-08-14: automation/,
+            # config/, errors/, jobs/, queues/, scripts/, services/, index.ts,
+            # rest of utils/).
 
 ui          packages/ordinatio-ui
             packages/ordinatio-errors
             packages/ordinatio-activities
+            # ordinatio-activities/src/intuition: alfred owns edits (Batch 4
+            # wiring); ui owns the rest of the package.
 
 tasks       packages/ordinatio-tasks
             apps/web/src/app/dashboard/tasks
@@ -70,6 +115,8 @@ domus       packages/ordinatio-domus
 
 realtime    packages/ordinatio-realtime
             apps/web/src/app/api/realtime
+            # packages/ordinatio-realtime: alfred owns edits (Batch 2 —
+            # publisher consolidation); this entry's own surface is api/realtime.
 
 core        packages/ordinatio-core
 
@@ -79,6 +126,56 @@ entities    packages/ordinatio-entities
 dedupe      packages/ordinatio-people-dedupe
             apps/web/src/app/dashboard/dedupe
             apps/web/src/app/api/dedupe
+
+vendor      apps/web/src/lib/gocreate
+            packages/shared/src/gocreate
+            apps/worker/src/api
+            apps/worker/src/portal
+            apps/worker/src/utils/gocreate-status-map.ts
+            apps/web/src/lib/garments
+            apps/web/src/app/api/garments
+            apps/web/src/lib/fabric
+            apps/web/src/lib/fit-profile
+            # apps/worker/src/api and apps/worker/src/portal are vendor-only
+            # (verified 2026-08-14; portal/ = the GoCreate Puppeteer client,
+            # 10 files; services/portal-http-client.ts + errors/portal-errors.ts
+            # deliberately stay with the blanket). gocreate-status-map.ts is
+            # file-level because utils/ is shared.
+            # Deliberately NOT listed (shared, stay with orders/worker):
+            # lib/orders, api/orders, api/internal/orders, consumers/.
+
+alfred      packages/ordinatio-agent
+            apps/web/src/lib/agents
+            apps/web/src/services/agent-chat
+            apps/web/src/services/agent
+            apps/web/src/app/api/agent
+            apps/web/src/components/command-bar
+            apps/web/src/components/agent-chat
+            packages/ordinatio-realtime
+            packages/ordinatio-activities/src/intuition
+            # Owns packages/ordinatio-agent EXCLUSIVELY. ordinatio-realtime:
+            # alfred owns package-side edits (Batch 2); api/realtime stays
+            # with realtime. intuition/: alfred owns edits (Batch 4 wiring);
+            # the rest of the activities package is ui's. lib/agents: comms
+            # ADDS its sms-tools file under lib/agents/tools/ when its
+            # Batch-1 files exist (declared in comms/profile.md); alfred owns
+            # everything else there.
+
+comms       packages/ordinatio-email
+            apps/web/src/app/api/email
+            apps/web/src/lib/sms
+            apps/web/src/app/api/sms
+            apps/web/src/services/transcription.service.ts
+            apps/worker/src/polling/email-poller.ts
+            apps/worker/src/consumers/sms-stream-consumer.ts
+            # Owns the email/SMS substrate; the email + sms entries keep the
+            # product-UI surfaces. Worker paths are FILE-level on purpose —
+            # those dirs hold other modules' pollers/consumers
+            # (scheduled-email-poller.ts is NOT comms's). apps/public-site
+            # contact form joins only when its Batch-2 files exist; comms's
+            # sms-tools file under alfred's lib/agents/tools/ joins the same
+            # way — granted via alfred's entry annotation, added when its
+            # Batch-1 files exist.
 ```
 
 ---
@@ -135,10 +232,13 @@ If `$ARGUMENTS` starts with "clear" (case-insensitive):
 If `[module]` was provided as an argument, use it. If not, list the registry and ask:
 ```
 Which module is this window working on?
-  email / scheduling / clients / orders / sms / cms / agents / auth / settings / worker / ui
+  [print every entry name from the MODULE REGISTRY above, in registry order,
+   excluding entries marked RETIRED]
 ```
 
-Validate the input against the registry. If not found, list available modules and ask again.
+Validate the input against the registry. If not found, list available modules
+and ask again. A name whose registry entry is marked RETIRED is INVALID —
+refuse, name the successor from its annotation, and do not proceed to Step 1.5.
 
 ---
 
@@ -338,7 +438,7 @@ If WORKER_COUNT_ACTUAL = 0, replace the Workers line with:
 For the remainder of this session:
 
 1. **Task file:** All task tracking uses `.autocode/modules/[module]/tasks.md` — not the global `.autocode/tasks.md`
-2. **Paths:** All audits, scans, tests, and code changes are limited to the module paths above
+2. **Paths:** All audits, scans, tests, and code changes are limited to the module paths above (a FILE-level path also covers its co-located test files — same basename + `.test.*` in the same directory — per the registry convention header)
 3. **Memory routing:** Write findings to the module's own memory files:
    - Security/auth findings → `.autocode/modules/[module]/security.md`
    - Async, architecture, data-loss → `.autocode/modules/[module]/architect.md`
