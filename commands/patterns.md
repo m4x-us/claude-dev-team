@@ -13,6 +13,12 @@ Read `.autocode/worldclass-trends.md` → `WORLDCLASS_RAW` (or "None").
 Read `.autocode/reflections.md` → `REFLECTIONS_RAW` (or "None").
 Read `~/.claude/autocode/philosophy.md` → `PHILOSOPHY_RAW` (or "None").
 
+List all `.autocode/patterns-archive-*.md` files, sorted by the date in the filename
+(ascending) → `ARCHIVE_FILES`. Each archive is one completed measurement WINDOW whose
+end date is the date in its filename; its start date is the previous archive's date
+(or the repo's first audit for the oldest). The live `patterns.md` is the current,
+incomplete window. These feed Phase 1H (trend + recurrence).
+
 ---
 
 ## PHASE 1: ANALYZE (silent — build all variables before generating HTML)
@@ -141,6 +147,59 @@ Overall health (based on systemic pattern count):
 2. Most recurring issue: "The most common issue is [plain English category] — it has appeared [N] times across [N] audit cycles." Or "No recurring issues yet."
 3. Trend: "Quality is [IMPROVING → getting better / STABLE → holding steady / DEGRADING → getting worse] over the last several tasks." If not enough data: "Not enough history yet to show a trend."
 
+**1H — Window-over-window trend + per-rule recurrence (the "are we objectively
+getting better?" analysis — added 2026-08-17):**
+
+Skip this entire step (and its HTML section) with a "Not enough history — need at
+least one completed archive window" note if `ARCHIVE_FILES` is empty.
+
+*Per-window stats.* For EACH file in `ARCHIVE_FILES` (and the live `patterns.md` as
+a partial current window), parse with 1A's exact finding regex and compute:
+- `cycles` (count of `^## ` headers), `total_findings`, `findings_per_cycle`
+- `high_sev_count` (severity ≥ 7) and `high_sev_share`
+- `avg_severity`, per-category counts
+- `window_start` / `window_end` (from archive filenames, per PHASE 0)
+- `lines_changed`: `git log --since=[window_start] --until=[window_end] --numstat
+  --format= -- 'apps/*' 'packages/*' | awk '{a+=$1+$2} END {print a+0}'` — real
+  work-volume normalization, so a heavy month isn't punished for being heavy
+- `findings_per_10kloc` = total_findings / (lines_changed/10000)
+
+`TREND_WINDOWS` = the array of per-window stat objects. The headline comparison is
+the two most recent COMPLETED windows (never the live partial one — a half-window
+always looks artificially good).
+
+*Per-rule recurrence.* For each row in PHILOSOPHY_RAW's `## CHANGELOG` (each row =
+one rule graduation, with a date), map the rule to its finding categories using the
+trigger text in that row (e.g. "Security pattern graduated" → security+auth+data-loss;
+"B7 violations" / "tests" → tests; "requirements" → requirements; if the trigger
+names no category, map from the rule's own subject matter and say so in a footnote).
+Then count, across ALL windows combined, findings in those categories dated
+STRICTLY AFTER the graduation date → `recurrences_since`. Also compute
+`pre_rate` (that category's findings/cycle before the date) vs `post_rate` (after).
+`RULE_RECURRENCE` = array of {rule, date, categories, recurrences_since, pre_rate,
+post_rate, verdict} where verdict is:
+- "HOLDING" if post_rate ≤ half of pre_rate
+- "PARTIAL" if post_rate < pre_rate but > half
+- "NOT HOLDING" if post_rate ≥ pre_rate
+Category granularity is coarser than rule granularity — a "tests" finding after
+Rule 18 isn't necessarily a Rule-18-shaped finding. State this limitation in the
+output verbatim; never present the table as more precise than it is.
+
+*Mandatory confound disclosures.* The trend output MUST carry these three notes,
+every run, not just when convenient — this metric is easy to read wrongly in both
+directions:
+1. WORK MIX: a window dominated by one kind of task (e.g. a test-suite-heavy month)
+   skews category counts; check the Task History table before reading a category
+   jump as decay.
+2. DETECTION SURFACE: when a gate/audit starts watching MORE code (record any such
+   change you know of from the window's own findings or CHANGELOG), raw counts rise
+   BECAUSE detection improved — the per-rule recurrence table is the
+   surface-growth-immune view; prefer it over raw counts whenever they disagree.
+3. GOODHART: the auditors are LLM reviewers; if this number ever becomes a target,
+   softer reviews are the cheapest way to improve it. Treat a sudden improvement
+   WITHOUT a corresponding mechanical change (new gate, new rule) as suspicious,
+   not celebratory.
+
 ---
 
 ## PHASE 2: GENERATE HTML REPORT
@@ -201,6 +260,42 @@ Left side of each card: 40×40px circle, background the card's accent color at 2
 - Card 3 icon: (IMPROVING → 📈 var(--green)) (STABLE → ➡️ var(--yellow)) (DEGRADING → 📉 var(--red))
 
 Right side: executive summary sentence in var(--text), font-size 15px.
+
+---
+
+**SECTION 2.5 — ARE WE GETTING BETTER? (window-over-window trend + rule scoreboard):**
+
+Renders only when Phase 1H produced data (≥1 completed archive window); otherwise a
+single muted card: "Not enough history yet — this section unlocks after the first
+archive cycle."
+
+Section label: "ARE WE GETTING BETTER?" (same uppercase label style).
+Subtitle: "Each row is one completed measurement window (an archived findings log).
+Raw counts are normalized by how much code actually changed that window — a heavy
+month isn't punished for being heavy." (13px muted)
+
+**Part A — window table.** One row per window in TREND_WINDOWS (completed windows
+only; the live partial window shown as a final greyed row labeled "current —
+incomplete", never compared):
+Window (start → end) | Audit cycles | Findings | Per cycle | Per 10k lines changed | Fix-Now+ share (sev ≥7) | Avg severity
+The two most recent completed windows get a delta chip on "Per 10k lines changed"
+and "Fix-Now+ share": green ▼ if improved, red ▲ if worse, grey ◆ if within ±10%.
+
+**Part B — rule scoreboard.** One card row per entry in RULE_RECURRENCE, sorted
+newest first, each with a verdict pill:
+- HOLDING → green pill; PARTIAL → yellow; NOT HOLDING → red
+- Row content: rule name + install date (14px, 600) · "[category list] findings:
+  [pre_rate]/cycle before → [post_rate]/cycle after" (13px muted) · the pill
+- A red NOT HOLDING row also prints: "This rule is not preventing its bug class —
+  candidate for a mechanical gate, not a stronger reminder." (matches this
+  project's own recorded lesson: prose rules that keep failing graduate to
+  commit-time gates.)
+
+**Part C — mandatory confound footer** (12.5px, muted, bordered card — the three
+disclosures from Phase 1H, verbatim, every run): work-mix, detection-surface,
+Goodhart. This footer is not optional and never trimmed for space — the whole
+section is worse than useless if these are dropped, because the raw table reads
+backwards exactly when detection improves.
 
 ---
 
@@ -378,6 +473,13 @@ Print in terminal:
   Saved: .autocode/reports/patterns-[date].html
   Total cycles tracked: [total_cycles]
   Philosophy markers on chart: [count of PHILOSOPHY_ANNOTATIONS]
+
+  Trend (last two completed windows, normalized per 10k lines changed):
+    [prev window dates]: [N] findings/10kloc, [N]% Fix-Now+
+    [last window dates]: [N] findings/10kloc, [N]% Fix-Now+  [▼ better / ▲ worse / ◆ flat]
+    (or "Trend unlocks after the first archive cycle")
+  Rule scoreboard: [N] HOLDING · [N] PARTIAL · [N] NOT HOLDING
+    [one line per NOT HOLDING rule: "[rule] — not preventing its class; gate candidate"]
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
@@ -613,3 +715,16 @@ If any WORLDCLASS_MANDATE updates were approved: commit and push the updated tas
 - Previous report files in .autocode/reports/ are never deleted
 - Philosophy updates are permanent — never propose vague or redundant additions
 - Archive prompt always runs before philosophy step
+- Trend comparisons (Phase 1H / Section 2.5) only ever compare COMPLETED archive
+  windows — the live partial patterns.md is displayed but never enters a delta or
+  verdict (a half-window always looks artificially good)
+- The three confound disclosures (work-mix, detection-surface, Goodhart) are
+  mandatory in both the HTML trend section and any spoken/terminal summary of the
+  trend — a raw findings count presented without them actively misleads, reading
+  "worse" exactly when detection improved
+- The per-rule recurrence table is the preferred signal whenever it disagrees with
+  raw counts — it is immune to work-mix and detection-surface growth; raw counts
+  are not
+- A rule verdict of NOT HOLDING is always paired with the gate-candidate note —
+  the recorded lesson is that repeat-failing prose rules need mechanical gates,
+  not stronger wording
