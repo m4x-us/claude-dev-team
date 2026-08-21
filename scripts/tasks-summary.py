@@ -81,13 +81,19 @@ NON_TITLE = re.compile(
 
 def parse_task_block(block: str) -> Optional[Task]:
     lines = block.split("\n")
-    m = re.match(r"^(\d+)", lines[0])
+    # Header is "### Task #N: Title" (title inline, same line as the number)
+    # or bare "### Task #N" (title comes from a later **What:**/plain-text
+    # line, per the fallback scan below).
+    m = re.match(r"^(\d+)\s*:?\s*(.*)", lines[0])
     if not m:
         return None
     task = Task(num=f"#{m.group(1).zfill(3)}")
+    if m.group(2).strip():
+        task.title = m.group(2).strip()
 
-    # Title: first meaningful non-field line
-    for ln in lines[1:]:
+    # Title: first meaningful non-field line (only used when the header
+    # line itself carried no inline title)
+    for ln in ([] if task.title else lines[1:]):
         s = ln.strip()
         if not s:
             continue
@@ -131,10 +137,15 @@ def parse_file(path: str) -> list:
 
     batches = []
     for section in re.split(r"^## Batch ", content, flags=re.MULTILINE)[1:]:
-        m = re.match(r"^(\d+)\s*[—–-]+\s*(.+)", section)
+        # Batch header is "N [TAG] — theme" — the bracketed sprint tag
+        # ("[CURRENT SPRINT]", "[COMPLETE — 2026-08-20]", etc.) and the
+        # dash+theme are both optional; a tag's own text may itself contain
+        # a dash, so the tag is matched as a whole bracketed unit before the
+        # real tag/theme separator is looked for.
+        m = re.match(r"^(\d+)\s*(?:\[[^\]]*\])?\s*(?:[—–-]+\s*(.+))?", section)
         if not m:
             continue
-        batch = Batch(num=int(m.group(1)), theme=m.group(2).strip())
+        batch = Batch(num=int(m.group(1)), theme=(m.group(2) or "").strip())
         for tblock in re.split(r"^### Task #", section, flags=re.MULTILINE)[1:]:
             t = parse_task_block(tblock)
             if t:
