@@ -469,7 +469,7 @@ if [ -f "$ADV_MD" ]; then
       "wave-worktrees.sh merge|W.5d merge delegated to the script" \
       "wave-worktrees.sh cleanup|W.5d cleanup delegated to the script" \
       "-X theirs|executable stream-over conflict resolution present" \
-      "git -C \"\$MAIN_ROOT\" merge|conflict-recovery merges target the MAIN checkout" \
+      "git -C \"\$TARGET_ROOT\" merge|conflict-recovery merges target the resolved TARGET_ROOT (module-window for a real module, main for 'global' — 2026-09-12 fix, never hardcoded to main), with plain (not backslash-escaped) quotes — this is prose showing a real, directly-copyable bash command, not a nested string literal" \
     ; do
       pat="${req%%|*}"; msg="${req#*|}"
       awk -v n="$W5D_LINE" 'NR>n' "$ADV_MD" | grep -q -- "$pat" \
@@ -481,7 +481,7 @@ if [ -f "$ADV_MD" ]; then
   # FORBIDDEN patterns — each of these is a documented incident vector.
   for forb in \
     "git worktree add|inline worktree creation (must go through wave-worktrees.sh)" \
-    "git branch -D|force-delete of branches (script owns refuse-if-unmerged -d)" \
+    "git branch -D|force-delete of branches written directly into advance.md's own prose (the script owns this — it prefers a genuine -d check from the target's own worktree and falls back to a script-internal -D only when no such worktree exists, always behind its own already-completed ancestry verification; advance.md itself must never instruct one inline)" \
     "Pre-worktree-isolation|legacy shared-tree compatibility language" \
     "The file \`.autocode/modules/.active-module\`|brief template still tells workers the replaced shared-marker story" \
   ; do

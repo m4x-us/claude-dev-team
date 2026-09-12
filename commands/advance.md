@@ -443,9 +443,19 @@ Print:
  Common causes:
  1. Stale worktree/branch from a prior crash → run: bash scripts/wave-worktrees.sh cleanup [MODULE_SLUG] [prior-wave-N]
     If cleanup refuses, a branch holds unmerged work — inspect with
-    `git log main..[branch]` and decide with Max. The refusal is the safety working.
+    `git log [MODULE_SLUG]-window..[branch]` (or `git log main..[branch]` for
+    'global') and decide with Max. The refusal is the safety working.
  2. pnpm install failed (network/disk) → fix, then re-run /advance.
  3. Main checkout not on 'main' → the script requires it; switch back first.
+ 4. Module has no active worktree on branch '[MODULE_SLUG]-window' → every real
+    (non-'global') module's wave streams now fork from its own long-lived window
+    branch, never from stale main (2026-09-12 fix — a module with accumulated,
+    unmerged work would otherwise silently lose access to it). Scope it first:
+    bash scripts/wave-worktrees.sh single [MODULE_SLUG]
+    then re-run /advance. This should not happen in normal use — if MODULE was
+    resolved from a live /scope session, its window worktree should already
+    exist; treat a genuine hit here as a sign something (a manual worktree
+    removal, a crash) needs investigating before re-scoping.
 
  This is a hard stop. Do NOT open worker windows.
  Return to Wait state. Fix the root cause. Re-run /advance."
@@ -535,15 +545,18 @@ Your file edits land on branch [STREAM_BRANCH[X]], isolated from other streams.
 The .autocode/ directory is symlinked to the main repo — suite commands (/task, /audit)
 work normally from your worktree CWD.
 
-The orchestrator merges your branch to main in W.5d after you report done.
-You do not need to git push or commit to main. The orchestrator handles it.
+The orchestrator merges your branch in W.5d after you report done — into
+[If MODULE is set and is not "global": "the [MODULE]-window branch, NOT main
+(main is never touched by a module-scoped wave)"] [If MODULE is unset or is
+"global": "main"].
+You do not need to git push or merge it yourself. The orchestrator handles it.
 Do not push, do not merge, do not switch branches.
 If you want to preserve mid-task work:
   git add -A -- . ':!.autocode' && git commit -m "wip: [description]"
 ⚠ NEVER run a bare `git add -A` here — always append `-- . ':!.autocode'`.
 Your .autocode is a symlink to the main repo; staging it can commit tracked-file
-deletions that a later merge would sweep onto main (the merge refuses such
-branches, which would strand your whole stream).
+deletions that a later merge would sweep onto that target branch (the merge
+refuses such branches, which would strand your whole stream).
 
 ⚠ If you skip the cd step and edit files from the repo root CWD, your changes land in
 the shared working tree and can be wiped by concurrent sessions. The cd is not optional.
@@ -857,40 +870,59 @@ Load STREAM_WORKTREE[X] and STREAM_BRANCH[X]:
     Run exactly: bash scripts/wave-worktrees.sh merge [MODULE_SLUG] [WAVE_NUM]
     Paste the COMPLETE output.
     The script is two-pass: Pass 1 runs ALL guards before touching anything —
-    the staged-index guard on main, then EVERY stream's tracked-.autocode-deletion
-    guard — and dies before a single branch is merged if any guard fails.
-    Pass 2 merges each branch --no-ff, skips already-merged branches, and on a
-    true content conflict AUTO-ABORTS (it never auto-resolves); a failure that
-    is not a content conflict is labeled "NOT a content conflict" with main
-    left unchanged.
+    the staged-index guard on the TARGET checkout (see below), then EVERY
+    stream's tracked-.autocode-deletion guard — and dies before a single
+    branch is merged if any guard fails.
+    Pass 2 merges each branch --no-ff into the TARGET branch, skips
+    already-merged branches, and on a true content conflict AUTO-ABORTS (it
+    never auto-resolves); a failure that is not a content conflict is
+    labeled "NOT a content conflict" with the TARGET branch left unchanged.
+
+    A REAL (non-'global') module's wave streams merge into its own
+    '[MODULE_SLUG]-window' branch, NEVER into literal main — main is
+    completely untouched by a module-scoped merge (2026-09-12 fix; 'global'
+    is the one sentinel that still targets main directly, matching its own
+    lack of a window branch). Every command below must target the SAME
+    place the script itself merged into — never assume main.
 
     ── TOYOTA STOP & FIX — if merge exits non-zero ──
     If the failure is a CONFLICT (the script has already auto-aborted the merge;
-    main is clean; nothing is in progress):
+    the target branch is clean; nothing is in progress):
+
+    First, resolve TARGET_ROOT and TARGET_BRANCH via the script itself —
+    never hand-derive this (a second, hand-copied lookup drifts from the
+    real one and lacks its die()-on-missing-module safety, which fails
+    silently at exactly the moment correctness matters most). Bind them in
+    the SAME Bash tool call as whichever resolution command Max picks (each
+    Bash call is a fresh shell; a binding from an earlier call does not
+    survive):
+      RESOLVED="$(bash scripts/wave-worktrees.sh resolve-target [MODULE_SLUG])" || exit 1
+      TARGET_ROOT="$(printf '%s' "$RESOLVED" | cut -f1)"
+      TARGET_BRANCH="$(printf '%s' "$RESOLVED" | cut -f2)"
+
     Print:
-    "✗ MERGE CONFLICT — wave [WAVE_NUM] (script aborted the merge; main is clean)
+    "✗ MERGE CONFLICT — wave [WAVE_NUM] (script aborted the merge; $TARGET_BRANCH is clean)
      
      Root cause: W.1 should have ensured streams own disjoint files. A conflict means
      either (a) a worker edited a file outside their File: field, or (b) a carry-forward
      from a prior wave modified a file this stream also owns.
      
-     All resolution commands run against the MAIN checkout. This window sits in a
-     module worktree (scope.md requires it) — a bare `git merge` here would merge the
-     stream branch into [MODULE]-window, NOT main. Bind MAIN_ROOT and run the chosen
-     merge in the SAME Bash tool call (each Bash call is a fresh shell — a binding
-     from an earlier call does not survive):
-       MAIN_ROOT=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")
+     All resolution commands run against $TARGET_ROOT (branch $TARGET_BRANCH) —
+     the SAME target the script's own automated merge used, computed above. A bare
+     `git merge` run from this window's own CWD would silently target whatever branch
+     THIS shell happens to be on, which may not be $TARGET_BRANCH — always pass -C
+     "$TARGET_ROOT" explicitly, never rely on CWD.
 
      Resolution options (each names the exact command — run only what Max picks):
-       resolve stream-over — git -C "$MAIN_ROOT" merge --no-ff -X theirs [STREAM_BRANCH[X]] -m 'advance: wave [WAVE_NUM] stream [X] merge (stream-over)'
+       resolve stream-over — git -C "$TARGET_ROOT" merge --no-ff -X theirs [STREAM_BRANCH[X]] -m 'advance: wave [WAVE_NUM] stream [X] merge (stream-over)'
                              (keeps the stream's side for conflicting hunks;
                               non-conflicting changes from BOTH sides land)
-       resolve main-over   — git -C "$MAIN_ROOT" merge --no-ff -X ours [STREAM_BRANCH[X]] -m 'advance: wave [WAVE_NUM] stream [X] merge (main-over)'
-                             (keeps main's side for conflicting hunks ONLY;
+       resolve target-over — git -C "$TARGET_ROOT" merge --no-ff -X ours [STREAM_BRANCH[X]] -m 'advance: wave [WAVE_NUM] stream [X] merge (target-over)'
+                             (keeps $TARGET_BRANCH's side for conflicting hunks ONLY;
                               the stream's non-conflicting changes still land)
-       manual              — git -C "$MAIN_ROOT" merge --no-ff [STREAM_BRANCH[X]], then edit each
-                             conflicted file under $MAIN_ROOT, `git -C "$MAIN_ROOT" add` each
-                             resolved file, and finish with `git -C "$MAIN_ROOT" commit --no-edit`
+       manual              — git -C "$TARGET_ROOT" merge --no-ff [STREAM_BRANCH[X]], then edit each
+                             conflicted file under $TARGET_ROOT, `git -C "$TARGET_ROOT" add` each
+                             resolved file, and finish with `git -C "$TARGET_ROOT" commit --no-edit`
      Never offer or run `-s ours`: it records a merge while discarding EVERY
      change on the stream branch — wholesale stream abandonment is a cleanup
      decision made with Max, not a merge option.
@@ -903,9 +935,9 @@ Load STREAM_WORKTREE[X] and STREAM_BRANCH[X]:
     If the failure is the staged-index guard or the .autocode-deletion guard:
     that refusal is the safety working — print it, resolve the underlying state
     with Max, never work around the guard.
-    If the failure is labeled "NOT a content conflict": main is unchanged and no
-    merge is in progress — read the git output above the label, fix the named
-    condition, and re-run the merge command.
+    If the failure is labeled "NOT a content conflict": the target branch is
+    unchanged and no merge is in progress — read the git output above the
+    label, fix the named condition, and re-run the merge command.
     ── end TOYOTA STOP ──
     
     Print: "✓ All wave [WAVE_NUM] stream branches merged."
@@ -913,10 +945,18 @@ Load STREAM_WORKTREE[X] and STREAM_BRANCH[X]:
   Step 3 — Remove worktrees and delete branches (script-owned; refuse-if-work-lost):
     Run exactly: bash scripts/wave-worktrees.sh cleanup [MODULE_SLUG] [WAVE_NUM]
     Paste the COMPLETE output.
-    Branch deletion uses refuse-if-unmerged semantics (never force-delete). If
-    cleanup refuses, a worktree holds uncommitted work or a branch holds unmerged
-    commits — that refusal is the safety working: inspect with Max
-    (git log main..[branch]), merge or recover the work, then re-run cleanup.
+    Branch deletion always verifies the branch is genuinely merged into the
+    SAME target branch Step 2 merged into (the module's own window branch
+    for a real module, main for 'global' — never hardcoded to main) before
+    removing it — normally via git's own safe -d check run from that
+    target's own worktree (a second, independent verification on top of
+    the script's internal one); it force-deletes only in the rare case
+    where that target has no live worktree to check from, relying solely
+    on the script's own already-completed verification in that case. If
+    cleanup refuses, a worktree holds uncommitted work or a branch holds
+    unmerged commits — that refusal is the safety working: inspect with Max
+    (git log [MODULE_SLUG]-window..[branch], or git log main..[branch] for
+    'global'), merge or recover the work, then re-run cleanup.
     The script also deletes the state file and prints the remaining worktree list;
     verify only the main checkout and module windows remain.
 

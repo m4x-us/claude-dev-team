@@ -149,6 +149,16 @@ echo "=== wave-worktrees.sh Behavioral Tests ==="
 echo ""
 echo "Group 1: create + output format"
 F1=$(fixture_repo); FIXTURES+=("$F1")
+# A registered module's wave streams now fork from its own <module>-window
+# branch, never main (the 2026-09-12 base-resolution bug this suite exists
+# to pin) — so every fixture needs its module scoped via `single` FIRST, and
+# a distinguishing commit on the window branch to prove new streams really
+# fork from IT, not from main.
+wwt "$F1" single m1
+WT_M1W=$(wt_or_absent "$(echo "$OUT" | grep '^WAVE_WT	m1	' | cut -f3)")
+echo "window-only marker" >> "$WT_M1W/apps/web/src/route.ts"
+git -C "$WT_M1W" add apps/web/src/route.ts >/dev/null 2>&1
+HOOK_EXIT=0 git -C "$WT_M1W" commit -q -m "window-only commit" >/dev/null 2>&1
 wwt "$F1" create m1 1 alice:W1A bob:W1B
 CREATE_OUT="$OUT"; CREATE_RC=$RC
 
@@ -165,11 +175,20 @@ WT_A=$(wt_or_absent "$(echo "$CREATE_OUT" | grep '^WAVE_WT	alice	' | cut -f3)")
 BR_A=$(echo "$CREATE_OUT" | grep '^WAVE_WT	alice	' | cut -f4)
 WT_B=$(wt_or_absent "$(echo "$CREATE_OUT" | grep '^WAVE_WT	bob	' | cut -f3)")
 
-# T3 — worktree + branch exist; branch tip == main tip
+# T3 — worktree + branch exist; branch tip == the module's OWN window tip,
+# NOT main's tip (T3d/T3e pin this — the exact regression class this fix
+# closes: a wave silently forking from stale main behind the module's own
+# accumulated, unmerged work).
 assert_true "[ -d '$WT_A' ] && [ -d '$WT_B' ]" "T3a: both worktree dirs exist"
 assert_eq "$BR_A" "advance/m1-w1-alice" "T3b: branch follows advance/<module>-w<N>-<name>"
-assert_eq "$(git -C "$F1" rev-parse "$BR_A" 2>/dev/null)" "$(git -C "$F1" rev-parse main)" \
-  "T3c: stream branch tip equals main tip"
+BR_A_SHA=$(git -C "$F1" rev-parse "$BR_A" 2>/dev/null)
+MAIN_SHA=$(git -C "$F1" rev-parse main 2>/dev/null)
+assert_eq "$BR_A_SHA" "$(git -C "$F1" rev-parse m1-window)" \
+  "T3c: stream branch tip equals the module's own window tip"
+assert_false "[ '$BR_A_SHA' = '$MAIN_SHA' ]" \
+  "T3d: stream branch tip is genuinely NOT main's tip (main has no window-only commit)"
+assert_contains "$(cat "$WT_A/apps/web/src/route.ts")" "window-only marker" \
+  "T3e: stream content includes the window-only commit — proves fork-from-window, not fork-from-main"
 
 # T4 — untracked env files copied into the worktree
 assert_true "[ -f '$WT_A/apps/web/.env.local' ] && [ -f '$WT_A/apps/worker/.env' ]" \
@@ -280,14 +299,16 @@ cp -R "$F1/.husky/_" "$WT_B/.husky/_"
 echo ""
 echo "Group 4: merge"
 
-# T21 — staged-index guard: merge refuses while main's index holds staged work
-echo "staged" > "$F1/staged-file.txt"
-git -C "$F1" add staged-file.txt >/dev/null 2>&1
+# T21 — staged-index guard: merge refuses while the TARGET (m1-window)'s
+# index holds staged work — the merge target moved from main to the
+# module's own window, so this guard must move with it.
+echo "staged" > "$WT_M1W/staged-file.txt"
+git -C "$WT_M1W" add staged-file.txt >/dev/null 2>&1
 wwt "$F1" merge m1 1
-assert_false "[ $RC -eq 0 ]" "T21: merge refuses while main index has staged changes"
+assert_false "[ $RC -eq 0 ]" "T21: merge refuses while the target checkout's index has staged changes"
 assert_contains "$ERR" "staged changes" "T21b: refusal names the staged changes"
-git -C "$F1" restore --staged staged-file.txt >/dev/null 2>&1 || git -C "$F1" reset --quiet staged-file.txt >/dev/null 2>&1
-rm -f "$F1/staged-file.txt"
+git -C "$WT_M1W" restore --staged staged-file.txt >/dev/null 2>&1 || git -C "$WT_M1W" reset --quiet staged-file.txt >/dev/null 2>&1
+rm -f "$WT_M1W/staged-file.txt"
 
 # T22 — .autocode deletion guard: a stream branch carrying .autocode deletions
 # must be refused (this is the 85-tracked-deletions hazard)
@@ -297,30 +318,36 @@ HOOK_EXIT=0 git -C "$WT_B" commit -q -m "bad: deletes .autocode" >/dev/null 2>&1
 wwt "$F1" merge m1 1
 assert_false "[ $RC -eq 0 ]" "T22a: merge refuses a branch that deletes tracked .autocode files"
 assert_contains "$ERR" "deletes tracked .autocode" "T22c: refusal names the .autocode deletion"
-assert_true "[ -f '$F1/.autocode/modules/m1/tasks.md' ]" "T22b: tracked .autocode file still on main"
+assert_true "[ -f '$WT_M1W/.autocode/modules/m1/tasks.md' ]" "T22b: tracked .autocode file still on the window branch"
 # undo the poison commit so later merge tests can proceed
 git -C "$WT_B" reset --hard -q HEAD~1 >/dev/null 2>&1
 git -C "$WT_B" update-index --skip-worktree .autocode/modules/m1/tasks.md >/dev/null 2>&1
 
-# T19 — clean merge lands stream content on main
+# T19 — clean merge lands stream content on the module's own window branch
+# (NOT main — main is never touched by a module-scoped merge any more)
 wwt "$F1" merge m1 1
 assert_eq "$RC" "0" "T19a: clean merge exits 0"
-assert_eq "$(cat "$F1/apps/web/src/route.ts")" "edit" "T19b: stream content landed on main"
+assert_eq "$(cat "$WT_M1W/apps/web/src/route.ts")" "edit" "T19b: stream content landed on the module window"
+assert_not_contains "$(cat "$F1/apps/web/src/route.ts")" "edit" "T19c: main's own working copy is untouched"
 
-# T20 — conflict: aborted, main left clean (fresh fixture; both sides edit same file)
+# T20 — conflict: aborted, the window branch left clean (fresh fixture; both
+# sides edit the same file — the collision now happens on m2-window, since
+# that's the real merge target)
 F2=$(fixture_repo); FIXTURES+=("$F2")
+wwt "$F2" single m2
+WT_M2W=$(wt_or_absent "$(echo "$OUT" | grep '^WAVE_WT	m2	' | cut -f3)")
 wwt "$F2" create m2 1 carol:W1A
 WT_C=$(wt_or_absent "$(echo "$OUT" | grep '^WAVE_WT	carol	' | cut -f3)")
 echo "stream edit" > "$WT_C/apps/web/src/route.ts"
 git -C "$WT_C" add apps/web/src/route.ts >/dev/null 2>&1
 HOOK_EXIT=0 git -C "$WT_C" commit -q -m "stream side" >/dev/null 2>&1
-echo "main edit" > "$F2/apps/web/src/route.ts"
-git -C "$F2" add apps/web/src/route.ts >/dev/null 2>&1
-HOOK_EXIT=0 git -C "$F2" commit -q -m "main side" >/dev/null 2>&1
+echo "window edit" > "$WT_M2W/apps/web/src/route.ts"
+git -C "$WT_M2W" add apps/web/src/route.ts >/dev/null 2>&1
+HOOK_EXIT=0 git -C "$WT_M2W" commit -q -m "window side" >/dev/null 2>&1
 wwt "$F2" merge m2 1
 assert_false "[ $RC -eq 0 ]" "T20a: conflicting merge exits non-zero"
-assert_false "git -C '$F2' rev-parse -q --verify MERGE_HEAD >/dev/null" "T20b: merge was aborted (no MERGE_HEAD)"
-assert_eq "$(cat "$F2/apps/web/src/route.ts")" "main edit" "T20c: main content untouched after abort"
+assert_false "git -C '$WT_M2W' rev-parse -q --verify MERGE_HEAD >/dev/null" "T20b: merge was aborted (no MERGE_HEAD)"
+assert_eq "$(cat "$WT_M2W/apps/web/src/route.ts")" "window edit" "T20c: window content untouched after abort"
 assert_contains "$ERR" "CONFLICT" "T20d: a real content conflict is labeled CONFLICT"
 
 # ─── GROUP 5: cleanup — refuse-if-work-lost ──────────────────────────────────
@@ -336,8 +363,10 @@ assert_true "git -C '$F2' rev-parse -q --verify advance/m2-w1-carol >/dev/null" 
 
 # T23 — uncommitted work in worktree → cleanup refuses
 # (-X theirs: T20 engineered a content conflict on this branch; resolve it
-#  deliberately so the branch becomes merged and T24/T25 test what they claim)
-git -C "$F2" merge --no-ff -q -X theirs -m "manual merge for T23" advance/m2-w1-carol >/dev/null 2>&1 \
+#  deliberately so the branch becomes merged and T24/T25 test what they claim.
+#  Merges into m2-window now, not $F2 — that's the real ancestry target
+#  cleanup's guard checks against post-fix.)
+git -C "$WT_M2W" merge --no-ff -q -X theirs -m "manual merge for T23" advance/m2-w1-carol >/dev/null 2>&1 \
   || echo "  (T23 setup: manual merge unexpectedly failed)"
 echo "uncommitted" > "$WT_C/apps/web/src/new-file.ts"
 wwt "$F2" cleanup m2 1
@@ -357,6 +386,7 @@ assert_false "[ -f '$F2/.autocode/modules/m2/.wave-state.json' ]" "T25d: wave-st
 echo ""
 echo "Group 6: per-checkout module markers"
 F3=$(fixture_repo); FIXTURES+=("$F3")
+wwt "$F3" single m1
 wwt "$F3" create m1 2 dave:W2A
 WT_D=$(wt_or_absent "$(echo "$OUT" | grep '^WAVE_WT	dave	' | cut -f3)")
 
@@ -410,6 +440,7 @@ echo "Group 8: atomic create, journaling, stale registrations"
 # exists at create time; this test exists so the warn can never be silently
 # dropped. Not counted as Phase-S red coverage.
 FW=$(fixture_repo); FIXTURES+=("$FW")
+wwt "$FW" single m2
 echo "dirty" >> "$FW/apps/web/src/route.ts"
 wwt "$FW" create m2 1 solo:W1A
 assert_contains "$ERR" "will NOT appear in the worktrees" \
@@ -420,6 +451,7 @@ assert_contains "$ERR" "will NOT appear in the worktrees" \
 # the exact-name pre-flight rev-parse, so bob's `git branch` fails (RC=128)
 # AFTER alice is fully created and bob is journaled.
 F5=$(fixture_repo); FIXTURES+=("$F5")
+wwt "$F5" single m1
 git -C "$F5" branch advance/m1-w9-bob/blocker >/dev/null 2>&1
 wwt "$F5" create m1 9 alice:W1A bob:W1B
 G1_STATE="$F5/.autocode/modules/m1/.wave-state.json"
@@ -447,6 +479,7 @@ assert_eq "$RC" "0" "G1-atomic-l: re-create succeeds after recovery + blocker re
 # G1-stale-reg — a crash-orphaned registration (rm -rf'd, never pruned) must
 # be refused at pre-flight, before ANY artifact is created.
 F6=$(fixture_repo); FIXTURES+=("$F6")
+wwt "$F6" single m1
 wwt "$F6" create m1 3 eve:W3A
 WT_E=$(wt_or_absent "$(echo "$OUT" | grep '^WAVE_WT	eve	' | cut -f3)")
 rm -rf "$WT_E"                                            # registration now stale
@@ -509,6 +542,7 @@ echo "Group 9: merge honesty (two-pass + diagnosis)"
 # G4-two-pass — ALL guards must run before ANY merge: a wave lands whole or
 # not at all. Poisoning stream B must leave stream A's clean branch unmerged.
 F7=$(fixture_repo); FIXTURES+=("$F7")
+wwt "$F7" single m1
 wwt "$F7" create m1 1 alice:W1A bob:W1B
 WT_A7=$(wt_or_absent "$(echo "$OUT" | grep '^WAVE_WT	alice	' | cut -f3)")
 WT_B7=$(wt_or_absent "$(echo "$OUT" | grep '^WAVE_WT	bob	' | cut -f3)")
@@ -520,18 +554,20 @@ git -C "$WT_B7" rm -r -q --cached .autocode >/dev/null 2>&1
 HOOK_EXIT=0 git -C "$WT_B7" commit -q -m "bad: deletes .autocode" >/dev/null 2>&1
 wwt "$F7" merge m1 1
 assert_false "[ $RC -eq 0 ]" "G4-two-pass-a: merge refuses the wave when ANY stream is poisoned"
-assert_false "git -C '$F7' merge-base --is-ancestor advance/m1-w1-alice main" \
+assert_false "git -C '$F7' merge-base --is-ancestor advance/m1-w1-alice m1-window" \
   "G4-two-pass-b: alice's clean branch was NOT merged (guards run before ANY merge)"
 
 # G4-misdiagnosis — an untracked file in main clashing with a stream's added
 # path is NOT a content conflict and must not be labeled as one.
 F8=$(fixture_repo); FIXTURES+=("$F8")
+wwt "$F8" single m1
+WT_M1W8=$(wt_or_absent "$(echo "$OUT" | grep '^WAVE_WT	m1	' | cut -f3)")
 wwt "$F8" create m1 1 mia:W1A
 WT_M8=$(wt_or_absent "$(echo "$OUT" | grep '^WAVE_WT	mia	' | cut -f3)")
 echo "stream file" > "$WT_M8/apps/web/src/clash.ts"
 git -C "$WT_M8" add apps/web/src/clash.ts >/dev/null 2>&1
 HOOK_EXIT=0 git -C "$WT_M8" commit -q -m "adds clash.ts" >/dev/null 2>&1
-echo "untracked in main" > "$F8/apps/web/src/clash.ts"    # untracked, never staged
+echo "untracked in window" > "$WT_M1W8/apps/web/src/clash.ts"    # untracked, never staged — the real merge target moved to m1-window
 wwt "$F8" merge m1 1
 assert_false "[ $RC -eq 0 ]" "G4-misdiagnosis-a: merge fails on the untracked-file clash"
 assert_not_contains "$ERR" "CONFLICT" "G4-misdiagnosis-b: failure is NOT labeled CONFLICT"
@@ -640,6 +676,8 @@ echo "Group 13: any-checkout lifecycle"
 F12=$(fixture_repo); FIXTURES+=("$F12")
 wwt "$F12" single ops
 WT_P12=$(wt_or_absent "$(echo "$OUT" | grep '^WAVE_WT	ops	' | cut -f3)")
+wwt "$F12" single m1
+WT_M1W12=$(wt_or_absent "$(echo "$OUT" | grep '^WAVE_WT	m1	' | cut -f3)")
 wwt "$F12" create m1 1 alice:W1A
 WT_A12=$(wt_or_absent "$(echo "$OUT" | grep '^WAVE_WT	alice	' | cut -f3)")
 echo "g9 stream" > "$WT_A12/apps/web/src/g9.ts"
@@ -647,11 +685,14 @@ git -C "$WT_A12" add apps/web/src/g9.ts >/dev/null 2>&1
 HOOK_EXIT=0 git -C "$WT_A12" commit -q -m "g9 stream side" >/dev/null 2>&1
 
 # G9a — the honest use case: Max's module window drives the wave lifecycle;
-# merge/cleanup operate on the MAIN checkout regardless of CWD.
+# merge/cleanup are invocable from ANY CWD ('ops', a neutral module, here)
+# but operate on module m1's own window worktree, never on the literal
+# main checkout — that's the whole point of this fix.
 wwt "$WT_P12" merge m1 1
-assert_eq "$RC" "0" "G9a-1: merge succeeds with CWD inside a module worktree"
-assert_eq "$(cat "$F12/apps/web/src/g9.ts" 2>/dev/null)" "g9 stream" \
-  "G9a-2: stream content landed on the MAIN checkout"
+assert_eq "$RC" "0" "G9a-1: merge succeeds with CWD inside a DIFFERENT module's worktree"
+assert_eq "$(cat "$WT_M1W12/apps/web/src/g9.ts" 2>/dev/null)" "g9 stream" \
+  "G9a-2: stream content landed on module m1's own window worktree"
+assert_false "[ -f '$F12/apps/web/src/g9.ts' ]" "G9a-2d: main checkout itself was never touched"
 # Re-running merge must be idempotent — advance.md's conflict-recovery flow
 # ("the script skips already-merged branches, so re-running merges only the
 # rest") is load-bearing prose; this pins the skip it depends on.
@@ -751,6 +792,7 @@ echo "Group 15: merge guard sees renamed-away .autocode deletions"
 # drops the pathspec or pipes through a rename-folding diff would go red);
 # B2's --no-renames on the same line is defense-in-depth, not the fix.
 F14=$(fixture_repo); FIXTURES+=("$F14")
+wwt "$F14" single m1
 wwt "$F14" create m1 1 nina:W1A
 WT_N=$(wt_or_absent "$(echo "$OUT" | grep '^WAVE_WT	nina	' | cut -f3)")
 git -C "$WT_N" update-index --no-skip-worktree .autocode/modules/m1/tasks.md >/dev/null 2>&1
@@ -761,6 +803,254 @@ HOOK_EXIT=0 git -C "$WT_N" commit -q -m "bad: renames .autocode file out" >/dev/
 wwt "$F14" merge m1 1
 assert_false "[ $RC -eq 0 ]" "T32a: merge refuses a rename-evading .autocode deletion"
 assert_contains "$ERR" "deletes tracked .autocode" "T32b: refusal names the .autocode deletion"
+
+# ─── GROUP 16: create refuses without a module window (base-resolution fix) ──
+echo ""
+echo "Group 16: create refuses when the module has no window worktree"
+
+# T33 — a registered module with no `single` ever run has no <module>-window
+# worktree; create must refuse loudly rather than silently basing on stale
+# main (the exact 2026-09-12 incident this whole fix exists to prevent).
+F15=$(fixture_repo); FIXTURES+=("$F15")
+wwt "$F15" create newmod 1 solo:W1A
+assert_false "[ $RC -eq 0 ]" "T33a: create refuses when module has no window worktree"
+assert_contains "$ERR" "no active worktree on branch 'newmod-window'" \
+  "T33b: refusal names the missing window branch"
+assert_contains "$ERR" "single newmod" "T33c: refusal names the exact fix command"
+assert_false "git -C '$F15' rev-parse -q --verify refs/heads/advance/newmod-w1-solo >/dev/null" \
+  "T33d: no stream branch created by the refused attempt"
+assert_false "[ -f '$F15/.autocode/modules/newmod/.wave-state.json' ]" "T33e: no wave-state created"
+
+# T33f — merge and cleanup refuse the same way for a module with no window.
+wwt "$F15" merge newmod 1
+assert_false "[ $RC -eq 0 ]" "T33f: merge also refuses without a window worktree"
+assert_contains "$ERR" "no active worktree on branch 'newmod-window'" "T33g: same refusal message"
+
+# ─── GROUP 17: the 'global' sentinel preserves legacy main-based behavior ────
+echo ""
+echo "Group 17: 'global' sentinel (unscoped /advance work) still bases on main"
+
+# T34 — /advance's sentinel for genuinely unscoped work has no window-branch
+# concept at all; it must keep basing directly on main, unlike every real
+# registered module.
+F16=$(fixture_repo); FIXTURES+=("$F16")
+wwt "$F16" create global 1 solo:W1A
+assert_eq "$RC" "0" "T34a: create succeeds for the 'global' sentinel with no window worktree"
+GLOBAL_BR=$(echo "$OUT" | grep '^WAVE_WT	solo	' | cut -f4)
+assert_eq "$(git -C "$F16" rev-parse "$GLOBAL_BR" 2>/dev/null)" "$(git -C "$F16" rev-parse main)" \
+  "T34b: global-scoped stream branch tip equals main's tip (legacy behavior preserved)"
+WT_SOLO16=$(wt_or_absent "$(echo "$OUT" | grep '^WAVE_WT	solo	' | cut -f3)")
+echo "global edit" > "$WT_SOLO16/apps/web/src/route.ts"
+git -C "$WT_SOLO16" add apps/web/src/route.ts >/dev/null 2>&1
+HOOK_EXIT=0 git -C "$WT_SOLO16" commit -q -m "global stream side" >/dev/null 2>&1
+wwt "$F16" merge global 1
+assert_eq "$RC" "0" "T34c: merge for 'global' succeeds"
+assert_eq "$(cat "$F16/apps/web/src/route.ts")" "global edit" \
+  "T34d: 'global' merge target IS literal main (unlike every real module)"
+
+# ─── GROUP 18: per-module locking ────────────────────────────────────────────
+echo ""
+echo "Group 18: per-module locking (up to ~15 concurrent sessions across modules)"
+
+# T35 — a stale lock (recorded pid no longer running, e.g. a crashed prior
+# session) is reclaimed automatically rather than deadlocking forever.
+F17=$(fixture_repo); FIXTURES+=("$F17")
+mkdir -p "$F17/.autocode/modules/m1/.wave-lock"
+( : ) & DEAD_PID=$!; wait "$DEAD_PID" 2>/dev/null   # a real pid, guaranteed exited
+echo "$DEAD_PID" > "$F17/.autocode/modules/m1/.wave-lock/pid"
+wwt "$F17" single m1
+assert_eq "$RC" "0" "T35a: single succeeds despite a stale lock with a dead pid"
+assert_contains "$ERR" "reclaiming stale lock" "T35b: stale-lock reclaim is logged"
+
+# T36 — a LIVE holder genuinely blocks a second invocation for a bounded
+# time, then refuses loudly rather than hanging forever (WAVE_WT_LOCK_TIMEOUT
+# shortens the wait for this test; production default is 300s).
+F18=$(fixture_repo); FIXTURES+=("$F18")
+mkdir -p "$F18/.autocode/modules/m1/.wave-lock"
+echo $$ > "$F18/.autocode/modules/m1/.wave-lock/pid"   # this test script's OWN pid — genuinely alive throughout
+WAVE_WT_LOCK_TIMEOUT=1 wwt "$F18" single m1
+assert_false "[ $RC -eq 0 ]" "T36a: single refuses after timing out on a live-held lock"
+assert_contains "$ERR" "could not acquire lock" "T36b: refusal names the lock-acquisition timeout"
+rm -rf "$F18/.autocode/modules/m1/.wave-lock"
+
+# T37 — two DIFFERENT modules' locks never contend — module X's orchestration
+# never blocks on module Y's, matching the 3-independent-windows operating
+# model even though both share one physical repo.
+F19=$(fixture_repo); FIXTURES+=("$F19")
+mkdir -p "$F19/.autocode/modules/other-mod/.wave-lock"
+echo $$ > "$F19/.autocode/modules/other-mod/.wave-lock/pid"
+WAVE_WT_LOCK_TIMEOUT=1 wwt "$F19" single m1
+assert_eq "$RC" "0" "T37: module m1's lock is unaffected by a held lock on a different module"
+rm -rf "$F19/.autocode/modules/other-mod/.wave-lock"
+
+# T38 — reclaim-race atomic gate: a `.reclaiming` marker already present
+# inside a stale (dead-pid) lock simulates a session that already won the
+# atomic reclaim race. This session must NOT also rm -rf + recreate the
+# lock out from under the winner (the exact TOCTOU the gate closes) — it
+# must fall through to the ordinary bounded wait and time out normally.
+F20=$(fixture_repo); FIXTURES+=("$F20")
+mkdir -p "$F20/.autocode/modules/m1/.wave-lock/.reclaiming"
+( : ) & DEAD_PID2=$!; wait "$DEAD_PID2" 2>/dev/null
+echo "$DEAD_PID2" > "$F20/.autocode/modules/m1/.wave-lock/pid"
+WAVE_WT_LOCK_TIMEOUT=1 wwt "$F20" single m1
+assert_false "[ $RC -eq 0 ]" "T38a: a lock whose reclaim race was already won by another session is not double-reclaimed — this session times out instead"
+assert_contains "$ERR" "could not acquire lock" "T38b: refusal is an ordinary timeout, not a successful steal"
+assert_true "[ -d '$F20/.autocode/modules/m1/.wave-lock/.reclaiming' ]" \
+  "T38c: the other session's .reclaiming marker (and thus its in-progress reclaim) was left untouched"
+
+# T44 — cross-generation reclaim race: a DIFFERENT session legitimately
+# reclaims and recreates the SAME lock (with its own live pid) WHILE this
+# session is mid-validation (between winning the .reclaiming gate and its
+# final recheck). The final recheck must detect the change and abandon the
+# reclaim instead of deleting the newly-live lock out from under it.
+F26=$(fixture_repo); FIXTURES+=("$F26")
+mkdir -p "$F26/.autocode/modules/m1/.wave-lock"
+( : ) & DEAD_PID3=$!; wait "$DEAD_PID3" 2>/dev/null
+echo "$DEAD_PID3" > "$F26/.autocode/modules/m1/.wave-lock/pid"
+(
+  sleep 0.5
+  rm -rf "$F26/.autocode/modules/m1/.wave-lock"
+  mkdir "$F26/.autocode/modules/m1/.wave-lock"
+  echo $$ > "$F26/.autocode/modules/m1/.wave-lock/pid"   # a genuinely LIVE pid
+  sleep 5   # stay alive through the recheck window
+) &
+INJECTOR_PID=$!
+WAVE_WT_LOCK_TIMEOUT=3 WAVE_WT_TEST_RECLAIM_DELAY=1 wwt "$F26" single m1
+kill "$INJECTOR_PID" 2>/dev/null; wait "$INJECTOR_PID" 2>/dev/null
+assert_false "[ $RC -eq 0 ]" "T44a: this session does not proceed past the abandoned reclaim — it waits/times out instead of destroying the concurrently-recreated live lock"
+assert_contains "$ERR" "changed during reclaim validation" "T44b: the recheck detects the concurrently-recreated live lock and abandons the reclaim"
+
+# T45 — compound crash: a `.reclaiming` marker with NO live owner (its own
+# reclaimer crashed mid-reclaim, before finishing rm -rf + recreate) must
+# eventually be cleared by AGE, not wait for a pid that will never come
+# back to life — otherwise every future contender is wedged for the full
+# timeout on every attempt, forever. WAVE_WT_RECLAIM_STALE_SECS shortens
+# the age threshold for this test; production default is 30s.
+F27=$(fixture_repo); FIXTURES+=("$F27")
+mkdir -p "$F27/.autocode/modules/m1/.wave-lock/.reclaiming"
+( : ) & DEAD_PID4=$!; wait "$DEAD_PID4" 2>/dev/null
+echo "$DEAD_PID4" > "$F27/.autocode/modules/m1/.wave-lock/pid"
+sleep 2   # let the .reclaiming marker age past the shortened threshold below
+WAVE_WT_RECLAIM_STALE_SECS=1 wwt "$F27" single m1
+assert_eq "$RC" "0" "T45a: single succeeds — an abandoned (aged-out) .reclaiming marker does not wedge acquisition forever"
+assert_contains "$ERR" "clearing abandoned .reclaiming marker" "T45b: the age-based cleanup is logged"
+
+# T46 — liveness trumps age: a `.reclaiming` marker whose OWN recorded
+# reclaimer is CONFIRMED still alive must never be cleared by the
+# age-based check, no matter how old it looks — a genuinely slow (not
+# crashed) reclaimer must not have its in-progress work destroyed by a
+# second session racing on elapsed time alone.
+F28=$(fixture_repo); FIXTURES+=("$F28")
+mkdir -p "$F28/.autocode/modules/m1/.wave-lock/.reclaiming"
+echo $$ > "$F28/.autocode/modules/m1/.wave-lock/.reclaiming/pid"   # this test script's OWN pid — genuinely alive throughout
+( : ) & DEAD_PID5=$!; wait "$DEAD_PID5" 2>/dev/null
+echo "$DEAD_PID5" > "$F28/.autocode/modules/m1/.wave-lock/pid"
+sleep 2   # age the marker well past the shortened threshold below
+WAVE_WT_RECLAIM_STALE_SECS=1 WAVE_WT_LOCK_TIMEOUT=1 wwt "$F28" single m1
+assert_false "[ $RC -eq 0 ]" "T46a: an aged .reclaiming marker with a confirmed-live owner is not cleared — this session times out instead"
+assert_not_contains "$ERR" "clearing abandoned .reclaiming marker" "T46b: the age-based clear never fires while the owner is confirmed alive"
+assert_true "[ -d '$F28/.autocode/modules/m1/.wave-lock/.reclaiming' ]" "T46c: the live reclaimer's marker survives"
+
+# T47 — resolve-target: the subcommand advance.md's conflict-recovery prose
+# depends on for a real module (TSV: worktree-path<TAB>branch), and its
+# refusal for a module with no window worktree (mirrors create/merge).
+F29=$(fixture_repo); FIXTURES+=("$F29")
+wwt "$F29" single m1
+WT_M1W29=$(wt_or_absent "$(echo "$OUT" | grep '^WAVE_WT	m1	' | cut -f3)")
+wwt "$F29" resolve-target m1
+assert_eq "$RC" "0" "T47a: resolve-target succeeds for a scoped module"
+assert_eq "$OUT" "$(printf '%s\t%s' "$WT_M1W29" "m1-window")" "T47b: TSV output is exactly <worktree-path>\\t<branch>"
+wwt "$F29" resolve-target nosuchmod
+assert_false "[ $RC -eq 0 ]" "T47c: resolve-target refuses a module with no window worktree"
+assert_contains "$ERR" "no active worktree on branch 'nosuchmod-window'" "T47d: same refusal message as create/merge"
+
+# T48 — set-module also rejects "global" (cmd_single already does; T43) —
+# an independent entry point to the same per-checkout marker must not be
+# able to bypass the same reservation.
+F30=$(fixture_repo); FIXTURES+=("$F30")
+wwt "$F30" set-module global
+assert_false "[ $RC -eq 0 ]" "T48a: set-module refuses to mark this checkout as the 'global' module"
+assert_contains "$ERR" "reserved module name" "T48b: refusal names the reservation"
+
+# T49 — timeout die() message names the ACTUALLY blocking pid: when a live
+# reclaimer is in progress at the moment of timeout, the message must name
+# the reclaimer's own pid, not the original (already-dead) holder recorded
+# in $lockdir/pid — naming the dead original pid here previously meant the
+# message's own "confirm it's dead, then remove" advice could walk an
+# operator into destroying a lock a live reclaim still held.
+F31=$(fixture_repo); FIXTURES+=("$F31")
+mkdir -p "$F31/.autocode/modules/m1/.wave-lock/.reclaiming"
+echo $$ > "$F31/.autocode/modules/m1/.wave-lock/.reclaiming/pid"   # this test script's own pid — genuinely alive
+( : ) & DEAD_PID6=$!; wait "$DEAD_PID6" 2>/dev/null
+echo "$DEAD_PID6" > "$F31/.autocode/modules/m1/.wave-lock/pid"
+WAVE_WT_LOCK_TIMEOUT=1 wwt "$F31" single m1
+assert_false "[ $RC -eq 0 ]" "T49a: single times out while a live reclaim is in progress"
+assert_contains "$ERR" "blocked by in-progress reclaim, pid $$" "T49b: the timeout message names the ACTUALLY-blocking (reclaimer's) pid"
+assert_not_contains "$ERR" "blocked by lock, pid $DEAD_PID6" "T49c: the message does not name the stale dead holder as the blocker"
+
+# T39 — require_wt=0 fallback: a dangling module-window REF (worktree
+# removed, branch ref survives) still resolves correctly for cleanup's
+# ancestry check — no live worktree is needed for a pure ref comparison.
+F21=$(fixture_repo); FIXTURES+=("$F21")
+wwt "$F21" single m1
+WT_M1W21=$(wt_or_absent "$(echo "$OUT" | grep '^WAVE_WT	m1	' | cut -f3)")
+wwt "$F21" create m1 1 pat:W1A
+WT_PAT21=$(wt_or_absent "$(echo "$OUT" | grep '^WAVE_WT	pat	' | cut -f3)")
+HOOK_EXIT=0 git -C "$WT_M1W21" merge --no-ff -q -m "merge pat" advance/m1-w1-pat >/dev/null 2>&1
+rm -rf "$WT_M1W21"
+git -C "$F21" worktree prune >/dev/null 2>&1
+wwt "$F21" cleanup m1 1
+assert_eq "$RC" "0" "T39: cleanup succeeds via the dangling-ref fallback (m1-window's worktree is gone, its branch ref alone still proves ancestry)"
+
+# T40 — require_wt=0 fallback: the module-window ref is ENTIRELY gone (never
+# scoped at all, or fully retired) — cleanup falls back to main with a WARN
+# rather than refusing outright, since there is nothing left to check
+# against and the module has zero recorded streams to lose.
+F22=$(fixture_repo); FIXTURES+=("$F22")
+mkdir -p "$F22/.autocode/modules/ghost"
+python3 -c "
+import json
+json.dump({'wave': 1, 'module': 'ghost', 'created_at': '2020-01-01T00:00:00Z', 'streams': {}}, open('$F22/.autocode/modules/ghost/.wave-state.json', 'w'))
+"
+wwt "$F22" cleanup ghost 1
+assert_eq "$RC" "0" "T40a: cleanup succeeds for a module with no streams and no window ref at all (fallback to main)"
+assert_contains "$ERR" "no 'ghost-window' ref at all" "T40b: the fallback WARN names the missing ref"
+
+# T41 — lock contention is not single-only: a live-held module lock also
+# blocks create (the header comment's own motivating incident was a wave
+# CLEANUP race, not a `single` race — this pins the property for the
+# mutating command actually named in that incident).
+F23=$(fixture_repo); FIXTURES+=("$F23")
+wwt "$F23" single m1
+mkdir -p "$F23/.autocode/modules/m1/.wave-lock"
+echo $$ > "$F23/.autocode/modules/m1/.wave-lock/pid"
+WAVE_WT_LOCK_TIMEOUT=1 wwt "$F23" create m1 1 solo:W1A
+assert_false "[ $RC -eq 0 ]" "T41a: create refuses on a live-held module lock, not just single"
+assert_contains "$ERR" "could not acquire lock" "T41b: refusal names the lock timeout"
+rm -rf "$F23/.autocode/modules/m1/.wave-lock"
+
+# T42 — the module-window-dirty WARN (distinct from the pre-existing
+# dirty-MAIN warn) fires when the module's own window worktree has
+# uncommitted tracked changes at create time.
+F24=$(fixture_repo); FIXTURES+=("$F24")
+wwt "$F24" single m1
+WT_M1W24=$(wt_or_absent "$(echo "$OUT" | grep '^WAVE_WT	m1	' | cut -f3)")
+echo "dirty on window" >> "$WT_M1W24/apps/web/src/route.ts"
+wwt "$F24" create m1 1 solo:W1A
+assert_eq "$RC" "0" "T42a: create still succeeds despite the dirty window (a WARN, not a refusal)"
+assert_contains "$ERR" "m1-window has uncommitted tracked changes" "T42b: the module-window-specific WARN fires"
+
+# T43 — "global" is a reserved sentinel name and cannot be scoped as a real
+# module: /advance's own unscoped-work sentinel would otherwise silently and
+# permanently swallow a module actually named "global" into always basing
+# on/merging into literal main — reproducing this fix's own root incident
+# for that one name.
+F25=$(fixture_repo); FIXTURES+=("$F25")
+wwt "$F25" single global
+assert_false "[ $RC -eq 0 ]" "T43a: single refuses to scope a module literally named 'global'"
+assert_contains "$ERR" "reserved module name" "T43b: refusal names the reservation"
+assert_false "git -C '$F25' rev-parse -q --verify refs/heads/global-window >/dev/null" \
+  "T43c: no global-window branch was created"
 
 echo ""
 echo "RESULTS: $TESTS_PASS/$TESTS_RUN passed"

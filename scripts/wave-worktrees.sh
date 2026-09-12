@@ -29,11 +29,13 @@
 #   scripts/wave-worktrees.sh list
 #   scripts/wave-worktrees.sh set-module <module>
 #   scripts/wave-worktrees.sh get-module
+#   scripts/wave-worktrees.sh resolve-target <module>
 #
 # stdout is MACHINE OUTPUT ONLY:
 #   create/single → one TSV line per worktree:  WAVE_WT\t<name>\t<path>\t<branch>
 #   verify/provision → ✓/✗ check lines + final "VERIFY PASS|FAIL <name> <p>/<n> head=<sha> at=<utc>"
 #   get-module    → the resolved module name
+#   resolve-target → one TSV line: <worktree-path>\t<branch>
 # Human progress goes to stderr. /advance and /go parse stdout verbatim.
 #
 # Env: WAVE_WT_NO_INSTALL=1  skip pnpm install (test fixtures; hook-arming
@@ -62,6 +64,223 @@ require_main_ready() {
   # every mutation runs against $MAIN_ROOT via git -C.
   local branch; branch=$(git -C "$MAIN_ROOT" rev-parse --abbrev-ref HEAD)
   [ "$branch" = "main" ] || die "main checkout must be on 'main' (currently: $branch)"
+}
+
+# ── PER-MODULE LOCK ─────────────────────────────────────────────────────────
+# Up to 3 module windows can each run up to 4 workers — as many as ~15
+# concurrent Claude sessions may invoke this script against the SAME shared
+# repo at once. create/merge/cleanup/single/provision all read-modify-write
+# a module's branch, worktree registration, and .wave-state.json; without
+# serialization, two sessions racing the SAME module's git metadata is a
+# real hazard (partial worktree removal was observed live in this exact
+# class of race during a Sep-12 wave cleanup). Two DIFFERENT modules' locks
+# never contend — matches the one-window-per-module operating model, so
+# module X's orchestration never blocks on module Y's.
+#
+# No `flock` on macOS (util-linux only) — `mkdir` is the portable atomic
+# primitive here (atomic on every filesystem this runs on, no dependency).
+# Stale-lock recovery: a lock directory whose recorded pid is no longer
+# running means the prior holder crashed without releasing — reclaimed
+# automatically, never left to deadlock forever. Reclaim itself is a second
+# atomic gate (mkdir on a not-yet-existing ".reclaiming" marker INSIDE the
+# stale dir): without it, two sessions can both observe the same dead pid,
+# both decide to reclaim, and interleave their rm -rf/mkdir calls such that
+# a slow reclaimer's rm -rf deletes the OTHER session's just-created, live
+# lock out from under it — both then believe they hold the lock
+# simultaneously. Only the session whose inner mkdir succeeds may actually
+# rm -rf + recreate; the loser falls through to the ordinary wait loop and
+# will see the winner's live pid on its next check, exactly like any other
+# contending session. A genuinely live holder blocks the caller for at most
+# WAVE_WT_LOCK_TIMEOUT seconds (default 300 — sized to comfortably exceed a
+# real, non-mocked `pnpm install` in this monorepo, which the lock is held
+# across via provision_worktree; a shorter default would spuriously refuse
+# a second legitimate same-module operation during ordinary contention, not
+# just genuine crash recovery), then refuses loudly rather than hanging — a
+# stuck session must be visible.
+#
+# A lock directory that exists but whose pid file hasn't been written yet
+# (a session is between its own `mkdir` and `echo $$ > pid`, a few
+# instructions wide) is NOT treated as stale or reclaimable — an empty
+# holder_pid correctly falls through to the ordinary wait loop rather than
+# being misread as abandoned.
+# Single-lock-per-process by design: MODULE_LOCK_DIR is one global and the
+# EXIT trap it installs replaces any prior one outright. No call site in
+# this script acquires two module locks in one invocation today (each
+# cmd_* dispatches to exactly one module) — if a future change ever needs
+# that, this must become a stack, not a bare variable, or the first lock
+# leaks (never released) when the second's trap overwrites it.
+# Three residual races were found and closed across review cycles, all
+# stemming from the same root shape (rm -rf + mkdir is not a single atomic
+# operation) — documented here so a FOURTH variant isn't rediscovered from
+# scratch:
+#   1. Cross-generation race: session B reads a dead holder pid, then stalls
+#      before acting. Meanwhile session E independently reclaims the SAME
+#      stale lock, legitimately recreating it with its own live pid. B then
+#      wins the (still-empty, freshly-recreated) .reclaiming gate and would
+#      delete E's live lock, believing it's still cleaning up the pid it
+#      originally read. Closed by re-reading pid and re-checking liveness
+#      immediately before the destructive rm -rf — if the lock changed
+#      underneath the reclaim, abandon it instead of deleting.
+#   2. Compound crash: the session that WINS the .reclaiming gate crashes
+#      between creating it and finishing the reclaim (rm -rf + recreate).
+#      The leftover .reclaiming marker then looks identical to "another
+#      session is genuinely mid-reclaim right now" forever — no live pid
+#      ever contends for it, so it would never be cleared, silently
+#      wedging every future contender for the full timeout.
+#   3. Slow-not-crashed reclaimer: a naive fix for #2 using AGE alone (clear
+#      .reclaiming once it's "old") would let a second session clear a
+#      marker whose owner is genuinely still alive and simply slow
+#      (scheduler starvation, a stalled disk) — not crashed — interfering
+#      with in-progress, legitimate work.
+# #2 and #3 are closed together: .reclaiming itself now carries its
+# creator's pid (written right after the mkdir that creates it). Liveness
+# is checked FIRST and always wins — a confirmed-alive owner's marker is
+# never cleared no matter how old it looks (closes #3). Only when no
+# recorded pid exists (crashed before writing it — a sub-microsecond
+# window) or the recorded pid is confirmed dead does AGE decide whether to
+# clear it (closes #2). This does NOT reopen case 1's regress: "two
+# sessions both see .reclaiming as unowned-and-aged-out and both try to
+# recreate it" reduces to the exact same already-atomic mkdir contest as
+# the base case (only one mkdir can win). WAVE_WT_RECLAIM_STALE_SECS's
+# default (30s) is NOT tied to any specific slow operation the way the
+# 300s lock timeout below is tied to a real pnpm install — every real
+# execution of the reclaim critical section (mkdir .reclaiming, one cat +
+# one kill -0, rm -rf, mkdir, echo) completes in well under a second. 30s
+# is deliberately just "obviously, unambiguously longer than legitimate
+# work here could ever take," not a measured ceiling — any value from ~5s
+# up would provide materially identical protection, and liveness (not
+# age) is what actually protects a real in-progress reclaim regardless.
+MODULE_LOCK_DIR=""
+acquire_module_lock() { # $1 = module, $2 = default timeout override (seconds)
+  local module="$1" timeout="${WAVE_WT_LOCK_TIMEOUT:-${2:-300}}"
+  local reclaim_stale_secs="${WAVE_WT_RECLAIM_STALE_SECS:-30}"
+  local lockdir="$MAIN_ROOT/.autocode/modules/$module/.wave-lock"
+  mkdir -p "$(dirname "$lockdir")"
+  local waited=0 holder_pid reclaiming_age reclaiming_mtime recheck_pid reclaiming_pid
+  while ! mkdir "$lockdir" 2>/dev/null; do
+    if [ -d "$lockdir/.reclaiming" ]; then
+      reclaiming_pid=$(cat "$lockdir/.reclaiming/pid" 2>/dev/null || true)
+      if [ -n "$reclaiming_pid" ] && kill -0 "$reclaiming_pid" 2>/dev/null; then
+        : # its own reclaimer is CONFIRMED still alive — never clear this
+          # out from under a live process no matter how old it looks. A
+          # genuinely slow-but-alive reclaimer (scheduler starvation, a
+          # stalled disk) must not have its marker yanked by age alone;
+          # liveness always wins over elapsed time.
+      else
+        # No recorded pid (crashed before writing it — a sub-microsecond
+        # window, see the mkdir+echo pairing below) or a recorded pid
+        # that's confirmed dead: fall back to AGE, since there is no
+        # signal from the process itself to trust. Fail CLOSED on an
+        # unreadable mtime (marker vanished between the -d test and stat,
+        # an exotic filesystem): treat it as freshly created (age 0),
+        # never as abandoned — falling back to epoch 0 instead would
+        # compute an age of decades and unconditionally clear it, exactly
+        # the failure direction this mechanism exists to prevent.
+        reclaiming_mtime=$(stat -f %m "$lockdir/.reclaiming" 2>/dev/null || stat -c %Y "$lockdir/.reclaiming" 2>/dev/null || date +%s)
+        reclaiming_age=$(( $(date +%s) - reclaiming_mtime ))
+        if [ "$reclaiming_age" -gt "$reclaim_stale_secs" ]; then
+          echo "  clearing abandoned .reclaiming marker in $lockdir (age ${reclaiming_age}s, no live owner — its own reclaimer appears to have crashed mid-reclaim)" >&2
+          rm -rf "$lockdir/.reclaiming" 2>/dev/null
+        fi
+      fi
+    fi
+    holder_pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+    if [ -n "$holder_pid" ] && ! kill -0 "$holder_pid" 2>/dev/null; then
+      if mkdir "$lockdir/.reclaiming" 2>/dev/null; then
+        echo $$ > "$lockdir/.reclaiming/pid"
+        # Test-only hook: widens this window so a test can deterministically
+        # inject a concurrent legitimate reclaim here. NEVER set outside
+        # test-wave-worktrees.sh.
+        [ "${WAVE_WT_TEST_RECLAIM_DELAY:-0}" = "0" ] || sleep "$WAVE_WT_TEST_RECLAIM_DELAY"
+        recheck_pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+        if [ "$recheck_pid" = "$holder_pid" ] && ! kill -0 "$holder_pid" 2>/dev/null; then
+          echo "  reclaiming stale lock $lockdir (holder pid $holder_pid is dead)" >&2
+          rm -rf "$lockdir"
+          continue
+        fi
+        echo "  lock $lockdir changed during reclaim validation — abandoning reclaim, waiting normally" >&2
+        rm -rf "$lockdir/.reclaiming" 2>/dev/null
+      fi
+      # Lost the reclaim race to another session (or abandoned our own
+      # after re-validation failed) — do not also rm -rf/mkdir here, that
+      # would reintroduce the exact TOCTOU this gate closes. Fall through
+      # to the ordinary bounded wait below.
+    fi
+    if [ "$waited" -ge "$timeout" ]; then
+      # Name whichever pid is ACTUALLY blocking, not always holder_pid: when
+      # a live reclaimer is in progress, holder_pid still reflects the
+      # ORIGINAL (already-dead) holder recorded in $lockdir/pid — the
+      # reclaimer hasn't replaced it yet, that's what "in progress" means.
+      # A message that named the dead original pid here would tell whoever
+      # reads it "confirm this pid is dead, then remove the lock manually"
+      # — true of the pid named, but wrong in effect: it would walk them
+      # into deleting a lock a live reclaim still holds, the exact
+      # destruction this whole mechanism exists to prevent.
+      local blocking_pid="$holder_pid" blocking_desc="lock"
+      local reclaiming_live_pid; reclaiming_live_pid=$(cat "$lockdir/.reclaiming/pid" 2>/dev/null || true)
+      if [ -n "$reclaiming_live_pid" ] && kill -0 "$reclaiming_live_pid" 2>/dev/null; then
+        blocking_pid="$reclaiming_live_pid"; blocking_desc="in-progress reclaim"
+      fi
+      die "could not acquire lock for module '$module' after ${timeout}s (blocked by $blocking_desc, pid ${blocking_pid:-unknown}) — another session may be mid-operation on this module; if it crashed, remove $lockdir manually after confirming pid ${blocking_pid:-unknown} is not running"
+    fi
+    sleep 1
+    waited=$((waited+1))
+  done
+  echo $$ > "$lockdir/pid"
+  MODULE_LOCK_DIR="$lockdir"
+  trap 'rm -rf "$MODULE_LOCK_DIR"' EXIT
+}
+
+# ── MODULE BASE-BRANCH RESOLUTION ───────────────────────────────────────────
+# Which branch does a module's wave-stream branches fork from, merge back
+# into, and get checked for ancestry against? Historically this was always
+# a hardcoded literal 'main' — WRONG for any module with unmerged work
+# sitting on its own long-lived '<module>-window' branch (the normal state:
+# Alfred/Scuderi/Scheduling routinely go many batches before merging to
+# main). A wave dispatched against stale main silently forks from behind
+# that accumulated work and loses access to all of it (observed live,
+# 2026-09-12 — all 4 of a wave's streams based on main instead of
+# alfred-window). Fixed: every REAL module resolves to its own
+# '<module>-window'. "global" is /advance's sentinel for genuinely unscoped
+# work (no window branch concept exists for it) — it alone resolves to
+# literal main, preserving the old behavior for that one legitimate case.
+#
+# Sets BASE_BRANCH (ref name) and BASE_WORKTREE (live worktree path, or ""
+# when require_wt=0 and only a dangling ref was found). NOT returned via
+# command substitution: this function calls die() on failure, and die()'s
+# exit only kills an enclosing $(...) subshell, silently leaving the caller
+# with empty values instead of actually exiting — callers must invoke this
+# directly, never as `x=$(resolve_module_base_branch ...)`.
+#
+# require_wt=1 (create, merge): the caller runs real git operations INSIDE
+# that worktree's checkout, so a dangling branch ref with no live worktree
+# is refused loudly — the module must be (re-)scoped first.
+# require_wt=0 (cleanup's ancestry check): a pure ref-to-ref comparison
+# needs no live worktree; if the ref is entirely gone (module fully retired
+# since this wave was created), fall back to main with a WARN rather than
+# block an otherwise-safe cleanup.
+resolve_module_base_branch() { # $1 = module, $2 = require_wt (1|0, default 1)
+  local module="$1" require_wt="${2:-1}"
+  if [ "$module" = "global" ]; then
+    BASE_BRANCH="main"; BASE_WORKTREE="$MAIN_ROOT"
+    return
+  fi
+  local branch="${module}-window"
+  local wt; wt=$(worktree_of_branch "$branch")
+  if [ -n "$wt" ] && [ -d "$wt" ]; then
+    BASE_BRANCH="$branch"; BASE_WORKTREE="$wt"
+    return
+  fi
+  if [ "$require_wt" = "1" ]; then
+    die "module '$module' has no active worktree on branch '$branch' — scope it first: bash scripts/wave-worktrees.sh single $module
+(if it WAS already scoped and this looks wrong, the worktree may be a stale, crash-orphaned registration — check: git worktree list --porcelain | grep -A1 'branch refs/heads/$branch', and if the directory is gone: git worktree prune, then re-run single $module)"
+  fi
+  if git -C "$MAIN_ROOT" rev-parse -q --verify "refs/heads/$branch" >/dev/null; then
+    BASE_BRANCH="$branch"; BASE_WORKTREE=""
+    return
+  fi
+  echo "WARN: module '$module' has no '$branch' ref at all (never scoped, or fully retired) — falling back to main for this check" >&2
+  BASE_BRANCH="main"; BASE_WORKTREE="$MAIN_ROOT"
 }
 
 ensure_exclude() {
@@ -203,8 +422,14 @@ cmd_create() {
   local module="$1" wave="$2"; shift 2
   require_module "$module"; require_wave "$wave"
   require_main_ready
+  acquire_module_lock "$module"
+  resolve_module_base_branch "$module" 1
+  local base_branch="$BASE_BRANCH"
   if [ -n "$(git -C "$MAIN_ROOT" status --porcelain=v1 --untracked-files=no)" ]; then
     echo "WARN: main checkout has uncommitted tracked changes; they will NOT appear in the worktrees." >&2
+  fi
+  if [ "$BASE_WORKTREE" != "$MAIN_ROOT" ] && [ -n "$(git -C "$BASE_WORKTREE" status --porcelain=v1 --untracked-files=no)" ]; then
+    echo "WARN: $base_branch has uncommitted tracked changes; they will NOT appear in the worktrees." >&2
   fi
   ensure_exclude
   local sf; sf=$(wave_state_file "$module")
@@ -261,7 +486,7 @@ PY
     wt="$WT_ROOT/${module}-w${wave}-${name}"
     state_add_stream "$sf" "$sid" "$name" "$wt" "$branch" || \
       create_fail "$module" "$wave" "could not journal stream $name in $sf"
-    git -C "$MAIN_ROOT" branch "$branch" main >&2 || \
+    git -C "$MAIN_ROOT" branch "$branch" "$base_branch" >&2 || \
       create_fail "$module" "$wave" "could not create branch $branch"
     git -C "$MAIN_ROOT" worktree add "$wt" "$branch" >&2 || \
       create_fail "$module" "$wave" "git worktree add failed for $wt"
@@ -294,7 +519,15 @@ cmd_single() {
   [ $# -eq 1 ] || usage_die "single <module>"
   local module="$1" branch="$1-window" wt existing
   require_module "$module"
+  # "global" is /advance's sentinel for genuinely unscoped work (see
+  # resolve_module_base_branch) — a real module named literally "global"
+  # would be silently swallowed by that special-case forever (always
+  # treated as unscoped, forking/merging against main instead of its own
+  # window), reproducing the exact class of bug this fix closes for that
+  # one name. Reserved outright.
+  [ "$module" != "global" ] || die "'global' is a reserved module name (used as /advance's sentinel for unscoped work) — choose a different name"
   require_main_ready
+  acquire_module_lock "$module"
   ensure_exclude
   # Resolve an existing worktree BY BRANCH before computing any path: the
   # live cms worktree predates the harness/ namespace and must be reused in
@@ -345,6 +578,7 @@ cmd_provision() {
       die "cannot infer module — marker absent; pass it explicitly: provision <path> <module>"
   fi
   require_module "$module"
+  acquire_module_lock "$module"
   provision_worktree "$wt" "$module"
   verify_wt "$wt" "" "" "$module"
   exit $?
@@ -503,18 +737,35 @@ cmd_merge() {
   local module="$1" wave="$2"
   require_module "$module"; require_wave "$wave"
   require_main_ready
-  # Guard: never entangle a wave merge with someone else's staged batch.
-  git -C "$MAIN_ROOT" diff --cached --quiet || \
-    die "main index has staged changes — land or unstage them before merging a wave (protects concurrent work)"
+  # Same default timeout as every other command — deliberately NOT
+  # shortened for merge/cleanup (tried in an earlier round; reverted). The
+  # lock is per-MODULE, not per-command: whatever currently holds it could
+  # legitimately be a `provision` call (a worker self-healing mid-wave,
+  # the G8-provision path) genuinely mid pnpm-install, regardless of which
+  # command is waiting. A shorter timeout here would spuriously refuse
+  # against that live, correct holder. It also buys nothing for the crash
+  # case this was meant to speed up: a genuinely DEAD holder is reclaimed
+  # on the very next loop iteration via the pid-liveness check above,
+  # independent of timeout entirely — the timeout only ever bounds how
+  # long this waits for a holder that is actually alive.
+  acquire_module_lock "$module"
+  resolve_module_base_branch "$module" 1
+  local target_root="$BASE_WORKTREE" target_branch="$BASE_BRANCH"
+  # Guard: never entangle a wave merge with someone else's staged batch —
+  # scoped to the TARGET checkout (the module's own window worktree for a
+  # real module, $MAIN_ROOT for the 'global' sentinel), not unconditionally
+  # $MAIN_ROOT.
+  git -C "$target_root" diff --cached --quiet || \
+    die "target checkout ($target_root, branch $target_branch) has staged changes — land or unstage them before merging a wave (protects concurrent work)"
   local streams; streams=$(wave_streams "$module" "$wave") || exit 1
   local name wt branch dels
   # Pass 1 — ALL guards before ANY merge: a wave lands whole or not at all
-  # (a per-stream guard-then-merge loop strands earlier streams on main when
-  # a later stream is refused).
+  # (a per-stream guard-then-merge loop strands earlier streams on the
+  # target branch when a later stream is refused).
   while IFS=$'\t' read -r name wt branch; do
     [ -n "$name" ] || continue
     # Guard: a stream branch must never delete tracked .autocode files —
-    # merging one would destroy shared module state on main.
+    # merging one would destroy shared module state on the target branch.
     # --no-renames is defense-in-depth here: the '-- .autocode/' pathspec
     # already prevents rename pairing across the boundary (verified; pinned by
     # T32), but a future edit that widens or drops the pathspec must not
@@ -524,7 +775,7 @@ cmd_merge() {
     # stderr goes to its own capture — a git WARNING on a successful diff must
     # not masquerade as a deletion list (fail-closed but misdiagnosed).
     local gerr; gerr=$(mktemp)
-    dels=$(git -C "$MAIN_ROOT" diff --no-renames --diff-filter=D --name-only "main...$branch" -- .autocode/ 2>"$gerr")
+    dels=$(git -C "$target_root" diff --no-renames --diff-filter=D --name-only "$target_branch...$branch" -- .autocode/ 2>"$gerr")
     if [ $? -ne 0 ]; then
       local gmsg; gmsg=$(cat "$gerr" 2>/dev/null); rm -f "$gerr"
       die "the .autocode deletion guard could not run for $branch (git diff failed: $gmsg) — refusing to merge unverified"
@@ -536,25 +787,25 @@ $dels"
   # Pass 2 — merge, diagnosing failures honestly before any abort.
   while IFS=$'\t' read -r name wt branch; do
     [ -n "$name" ] || continue
-    if git -C "$MAIN_ROOT" merge-base --is-ancestor "$branch" main 2>/dev/null; then
+    if git -C "$target_root" merge-base --is-ancestor "$branch" "$target_branch" 2>/dev/null; then
       echo "$branch already merged — skipping" >&2
       continue
     fi
-    echo "merging $branch ..." >&2
-    if ! git -C "$MAIN_ROOT" merge --no-ff -m "/advance $module W$wave: merge stream $branch
+    echo "merging $branch into $target_branch ..." >&2
+    if ! git -C "$target_root" merge --no-ff -m "/advance $module W$wave: merge stream $branch
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>" "$branch" >&2; then
-      if [ -n "$(git -C "$MAIN_ROOT" ls-files -u)" ]; then
-        git -C "$MAIN_ROOT" merge --abort 2>/dev/null || \
-          die "CONFLICT merging $branch AND merge --abort itself failed — inspect $MAIN_ROOT manually (a merge may still be in progress)"
+      if [ -n "$(git -C "$target_root" ls-files -u)" ]; then
+        git -C "$target_root" merge --abort 2>/dev/null || \
+          die "CONFLICT merging $branch AND merge --abort itself failed — inspect $target_root manually (a merge may still be in progress)"
         die "CONFLICT merging $branch — file-set isolation was violated. Merge aborted; resolve with Max, never auto-resolve."
       fi
       # No unmerged index entries → no merge is in progress (--abort here
-      # would itself exit 128). Main is unchanged.
-      die "merge of $branch failed but is NOT a content conflict (see git output above). Main is unchanged; fix the named condition and re-run merge."
+      # would itself exit 128). $target_branch is unchanged.
+      die "merge of $branch failed but is NOT a content conflict (see git output above). $target_branch is unchanged; fix the named condition and re-run merge."
     fi
   done <<< "$streams"
-  echo "✓ all W$wave stream branches merged into main" >&2
+  echo "✓ all W$wave stream branches merged into $target_branch" >&2
 }
 
 cmd_cleanup() {
@@ -562,6 +813,11 @@ cmd_cleanup() {
   local module="$1" wave="$2"
   require_module "$module"; require_wave "$wave"
   require_main_ready
+  # Same default timeout as every other command — see cmd_merge's comment
+  # for why a shorter one here doesn't actually hold up.
+  acquire_module_lock "$module"
+  resolve_module_base_branch "$module" 0
+  local base_branch="$BASE_BRANCH" base_worktree="$BASE_WORKTREE"
   local streams; streams=$(wave_streams "$module" "$wave") || exit 1
   local name wt branch dirty cwd_p wt_p
   cwd_p=$(pwd -P)
@@ -581,7 +837,7 @@ cmd_cleanup() {
 $dirty"
     fi
     if git -C "$MAIN_ROOT" rev-parse -q --verify "refs/heads/$branch" >/dev/null; then
-      git -C "$MAIN_ROOT" merge-base --is-ancestor "$branch" main || \
+      git -C "$MAIN_ROOT" merge-base --is-ancestor "$branch" "$base_branch" || \
         die "branch $branch has unmerged work — run: merge $module $wave first (refusal = safety working)"
     fi
   done <<< "$streams"
@@ -594,7 +850,24 @@ $dirty"
       echo "removed worktree $wt" >&2
     fi
     if git -C "$MAIN_ROOT" rev-parse -q --verify "refs/heads/$branch" >/dev/null; then
-      git -C "$MAIN_ROOT" branch -d "$branch" >&2 || die "git branch -d refused for $branch — unmerged work?"
+      # Prefer git's OWN -d safety check as a SECOND, independent layer on
+      # top of Pass 1's ancestry check above — not because Pass 1 alone is
+      # insufficient, but because it's free when a live worktree exists:
+      # run from $base_worktree (whose own HEAD IS $base_branch), -d's
+      # internal "is this merged into HEAD" check uses the correct
+      # reference and genuinely re-verifies what Pass 1 already found. Only
+      # fall back to -D when there's no live worktree to check from (the
+      # require_wt=0 dangling-ref case, base_worktree="") — -d there would
+      # run against whatever $MAIN_ROOT happens to be on (always literal
+      # main), which is the wrong reference for any real module and would
+      # incorrectly refuse an already-safely-merged branch; Pass 1's
+      # correct, already-completed check is the only verification available
+      # in that case, and -D acts on it rather than bypassing it.
+      if [ -n "$base_worktree" ]; then
+        git -C "$base_worktree" branch -d "$branch" >&2 || die "git branch -d failed for $branch from $base_worktree (branch $base_branch) — inspect manually"
+      else
+        git -C "$MAIN_ROOT" branch -D "$branch" >&2 || die "git branch -D failed for $branch — inspect manually (Pass 1 already verified it was merged into $base_branch)"
+      fi
       echo "deleted branch $branch" >&2
     fi
   done <<< "$streams"
@@ -612,6 +885,11 @@ cmd_list() {
 cmd_set_module() {
   [ $# -eq 1 ] || usage_die "set-module <module>"
   require_module "$1"
+  # Same reservation as cmd_single (see its comment) — set-module is a
+  # second, independent entry point that would otherwise let "global" reach
+  # the per-checkout marker (and from there, every module-scoped path in
+  # advance.md/scope.md) without ever going through single's own check.
+  [ "$1" != "global" ] || die "'global' is a reserved module name (used as /advance's sentinel for unscoped work) — choose a different name"
   local gd; gd=$(git rev-parse --absolute-git-dir)
   echo "$1" > "$gd/active-module"
   echo "module '$1' → $gd/active-module" >&2
@@ -631,6 +909,30 @@ cmd_get_module() {
   if [ -n "$m" ]; then echo "$m"; fi
 }
 
+# Exposes resolve_module_base_branch() to callers outside this script (chiefly
+# /advance's own conflict-resolution prose) so they never have to hand-roll
+# their own copy of the worktree/branch lookup — a second, hand-copied
+# implementation drifts from the real one and, lacking its die()/WARN
+# semantics, fails silently (an empty TARGET_ROOT from a missing module) at
+# exactly the moment correctness matters most (mid-conflict, guided by a
+# human). Always require_wt=1 — the only real caller resolves where to run a
+# live `git merge`, which needs an actual worktree to run in.
+#
+# Deliberately does NOT acquire the module lock — this is the one
+# module-touching command that doesn't. Locking it would be cosmetic, not
+# protective: this process's own lock would release when IT exits, before
+# advance.md's human-guided `git merge` command (a separate process it can
+# never hold a lock across) even runs. The real conflict-resolution window
+# this feeds into is inherently unprotected by this script's locking either
+# way — a pure read here doesn't change that, so it isn't pretending to.
+cmd_resolve_target() {
+  [ $# -eq 1 ] || usage_die "resolve-target <module>"
+  local module="$1"
+  require_module "$module"
+  resolve_module_base_branch "$module" 1
+  printf '%s\t%s\n' "$BASE_WORKTREE" "$BASE_BRANCH"
+}
+
 case "${1:-}" in
   create)     shift; cmd_create "$@";;
   single)     shift; cmd_single "$@";;
@@ -638,8 +940,9 @@ case "${1:-}" in
   merge)      shift; cmd_merge "$@";;
   cleanup)    shift; cmd_cleanup "$@";;
   provision)  shift; cmd_provision "$@";;
+  resolve-target) shift; cmd_resolve_target "$@";;
   list)       cmd_list;;
   set-module) shift; cmd_set_module "$@";;
   get-module) cmd_get_module;;
-  *) usage_die "wave-worktrees.sh create|single|verify|merge|cleanup|provision|list|set-module|get-module ...";;
+  *) usage_die "wave-worktrees.sh create|single|verify|merge|cleanup|provision|list|set-module|get-module|resolve-target ...";;
 esac
