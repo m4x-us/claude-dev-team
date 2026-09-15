@@ -150,7 +150,6 @@ alfred      packages/ordinatio-agent
             apps/web/src/services/agent
             apps/web/src/app/api/agent
             apps/web/src/components/command-bar
-            apps/web/src/components/agent-chat
             packages/ordinatio-realtime
             packages/ordinatio-activities/src/intuition
             # Owns packages/ordinatio-agent EXCLUSIVELY. ordinatio-realtime:
@@ -349,6 +348,70 @@ If file doesn't exist: note "No task file yet — run /scan to generate one."
 **D. WorldClass history** — if `.autocode/modules/[module]/cto.md` exists:
   Find `WorldClass score: [N]/100` lines → average the last 3.
   If file doesn't exist: "—"
+
+**E. MAINTENANCE-PHASE STALENESS GATE.** A module can decline into a stale
+periodic-audit backlog just as easily as it can decline into unstaged work
+or a broken worktree — this hard-stop exists for the same reason STEP
+1.5-A's worktree-verify check does: catching drift mechanically, before it
+compounds into real damage, beats trusting a session to remember to check.
+(STEP 1.5-B's staged-work guard is a DIFFERENT case — it lets a user type
+`ack` past an other-module warning, so it is not cited as this gate's
+precedent; only the genuinely bypass-free checks are.) The actual
+day-count computation lives in `mm_check_staleness()`
+(`scripts/lib/module-maintenance.sh`) — a real, independently tested
+function (`scripts/test-module-maintenance.sh`), not inline bash+python
+embedded here, so this gate's own logic can never silently drift from what
+its tests actually cover. If `scripts/lib/module-maintenance.sh` does not
+exist: hard stop the same way STEP 1.5-C does for a missing
+`wave-worktrees.sh` (install from claude-dev-team, run its test suite,
+retry) — do not silently skip this gate just because its own library is
+missing.
+```bash
+source scripts/lib/module-maintenance.sh
+mm_check_staleness [module]
+```
+Read both the printed line and the exit code:
+- Exit `0` (`NO_MARKER`, `NOT_MAINTENANCE <lifecycle>`, or `FRESH <days>
+  <cadence>`): not applicable, or fresh enough — silent, no banner, no
+  fanfare, continue straight to STEP 3.
+- Exit `2`, printed line is `NEVER_AUDITED`: the module is marked
+  `lifecycle: "maintenance"` but has no `last_audit` recorded yet. **This
+  is the NORMAL, expected state for a module's first maintenance cycle**
+  — declaring maintenance phase (setting `lifecycle`) and running the
+  first real audit (setting `last_audit`) are two separate, sequential
+  steps (see `/maintain`'s Task #7 pilot), so a module can genuinely sit
+  in this exact state for a short window. Still a hard stop — the module
+  isn't safe to work in until that first audit actually runs — but the
+  message must give the real, correct next action, not tell a session to
+  go spelunking in a JSON file for a state that isn't actually anomalous:
+  ```
+  ✗ [MODULE] is marked lifecycle: "maintenance" but has no recorded audit
+  yet. Run `/maintain [module]` to complete its first maintenance cycle
+  before starting new work here.
+  ```
+- Exit `2`, printed line is `INVALID_DATE <value>` or `INVALID_CADENCE
+  <value>`: the marker's `last_audit` or `cadence_days` field is present
+  but corrupt (a hand-edit typo, most likely) — genuinely anomalous, unlike
+  `NEVER_AUDITED` above. **Hard stop**:
+  ```
+  ✗ [MODULE] is marked lifecycle: "maintenance" but its marker is corrupt
+  ([the printed line, verbatim]). Investigate
+  `.autocode/modules/[module]/.maintenance.json` directly before
+  proceeding — this should not happen from normal `/maintain` usage.
+  ```
+- Exit `1` (`STALE <days_since> <cadence_days>`): genuinely past cadence.
+  **Hard stop** (no bypass flag — matching STEP 1.5-A's worktree-verify
+  check; not a new pattern):
+  ```
+  ✗ [MODULE] is in maintenance phase and its last audit was [days_since]
+  days ago (cadence: [cadence_days] days). Run `/maintain [module]` before
+  starting new work here.
+  ```
+- Exit `3` (`INVALID_MODULE_NAME <module>`): should not be reachable here
+  (STEP 1 already validated `[module]` against the registry before this
+  point), but if it somehow fires anyway: hard stop and report it verbatim
+  — do not guess at a module name substitution for the message above.
+Do not proceed to STEP 3 while any hard stop above is active.
 
 ---
 
