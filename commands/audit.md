@@ -55,6 +55,34 @@ Set `MODE = "orchestrated"`
 
 In standalone mode (no `TASK_DEFINITION:` prefix): `CYCLE_HISTORY = "None"`. Set `MODE = "standalone"`.
 
+**Audited-batch detection (global rule — applies in every project):**
+If $ARGUMENTS matches (case-insensitive) `batch\s*#?(\d+)`: set `AUDITED_BATCH_NUM` to that
+integer — this invocation is scoped to a specific existing batch (e.g. "/audit batch 12").
+Else: `AUDITED_BATCH_NUM = null` — this invocation is scoped to a task, feature, or file path,
+not a whole batch, and has no batch of its own to return findings to.
+
+This value governs where FAIL findings get promoted (see PROMOTE FINDINGS TO BATCH TASKS below):
+findings from an audited batch belong IN that batch, not wherever the team happens to be
+working right now. Promoting them elsewhere breaks two things: it silently expands the scope of
+whatever batch they land in instead of the one that was actually reviewed, and it severs the
+audit trail — nothing will prompt a re-audit of the ORIGINAL batch once its (now-elsewhere) fixes
+land, so a batch can sit "COMPLETE" forever with known unresolved findings nobody re-checks.
+
+It also drives the audited batch's sprint status. When a batch-scoped audit FAILs and findings
+land in that batch, the batch automatically becomes `[CURRENT SPRINT]` (pausing whatever batch
+held that tag before) and stays the active sprint through every /advance wave that follows —
+this is not a one-time nudge, it is a standing gate. Only a LATER "/audit batch [N]" run on that
+same batch returning PASS closes the gate: the batch is marked complete and whatever sprint it
+interrupted resumes automatically. See the sprint-takeover step (FAIL path) and the gate-close
+step (PASS path) below for the mechanics.
+
+This gate is SHARED with `/worldclass`'s batch mode — both tools open and close the exact same
+`BATCH_REMEDIATION_GATE` on a batch, so a batch scored low by `/worldclass batch [N]` becomes
+`[CURRENT SPRINT]` through this same mechanism, and either tool returning a clean result on that
+batch can close it. Not every batch converges to a clean PASS/score — Max can end the cycle
+early via the ACCEPT-AS-DEBT procedure below, which logs whatever's left to `debt.md` and closes
+the gate without requiring a re-audit or re-score.
+
 Read `~/.claude/autocode/philosophy.md` in full. Capture the entire contents as `PROJECT_PHILOSOPHY`. This is the standard every audit agent will work against. If the file doesn't exist, print a warning and continue — but note that agents will be working without the philosophy standard.
 
 Extract primary terms from $ARGUMENTS (nouns, verbs, domain concepts — e.g. "audit SMS inbound flow" → terms: sms, inbound, flow).
@@ -564,15 +592,15 @@ CODE DIFF — what changed:
 
 Your job is three investigations. Run all three. Do not skip any.
 
-INVESTIGATION 1 — CLAIM AUDIT
-Find every piece of text in TASK_SCOPE that makes a factual claim about the code. This includes:
-- File headers: 'USED BY: X', 'DEPENDS ON: Y', 'USED BY: content-cache.ts exclusively'
-- Table entries, comments, or docstrings saying something is 'covered', 'validated', 'handled', or 'tested'
+INVESTIGATION 1 — CLAIM AUDIT (policy v2, 2026-10-15: matches /worldclass REVIEW POLICY v2 and the Comment rule in docs/ARCHITECTURE.md)
+Check ONLY claims that something else relies on. In TASK_SCOPE, find:
 - B12 or coverage tables listing which output fields have test assertions
 - Test file headers or describe block names describing what they test
-- Any comment saying 'covered by type structure' or 'covered by existing' or 'this is handled by X'
+- Any comment or docstring about SECURITY or MONEY behavior (auth, tenant scope, refunds, payments, approval gates)
 
-For each claim you find: locate the code the claim refers to. Ask only: is this claim literally true right now in the current files?
+Do NOT report ordinary comment wording. File headers ('USED BY', 'DEPENDS ON'), 'covered by', counts, stale file lists, and docstring phrasing are NITS: list them under 'NITS (no score impact)' at severity 1 and do not count them as findings. The fix for those is to delete the comment, which the commit-time comment gate already enforces for new comments.
+
+For each claim you do check: locate the code the claim refers to. Ask only: is this claim literally true right now in the current files? A false security or money comment is severity 4 or higher ONLY if no test pins that behavior. If a test pins it, the comment is a nit. If none does, report the missing test, not the comment.
 
 'Covered by type structure' is false if there is also explicit runtime validation code for that field — runtime checks require runtime tests, not type inference.
 'USED BY: content-cache.ts' is false if content.ts or content-fetch.ts also imports the same file.
@@ -1015,7 +1043,15 @@ If TASKS_PATH does not exist:
   BATCH_NUM = 1
   NEXT_NUM = 1
 Else:
-  BATCH_NUM = highest integer N in any "## Batch [N]" header in TASKS_PATH (default 1 if none found)
+  If AUDITED_BATCH_NUM is set AND a "## Batch [AUDITED_BATCH_NUM]" header exists in TASKS_PATH:
+    BATCH_NUM = AUDITED_BATCH_NUM — findings return to the batch that was actually audited,
+    never to whatever batch is currently in progress elsewhere.
+  Else:
+    BATCH_NUM = highest integer N in any "## Batch [N]" header in TASKS_PATH (default 1 if none found)
+    (This is the fallback for audits not scoped to a specific batch — e.g. auditing a single
+    task, a feature area, or a file path. There is no "home batch" to return findings to, so
+    they land wherever the team is currently working.)
+
   NEXT_NUM = (highest integer N in any "### Task #[N]" line across ALL batches) + 1
              (default 1 if no tasks exist yet)
 
@@ -1078,11 +1114,55 @@ For each finding in promotion set (already validated above):
 
 ── End of promotion write ──
 
+BATCH_WAS_REOPENED = false
+BATCH_OLD_TAG = null
+PAUSED_BATCH_NUM = null
+
+── Make the audited batch the current sprint, and gate it until it re-audits clean ──
+Only runs when BATCH_NUM = AUDITED_BATCH_NUM (this audit was scoped to a specific batch, e.g.
+"/audit batch 12") AND N_PROMOTED > 0 (at least one finding actually landed there — a clean
+re-audit with nothing to fix should not disturb anything).
+
+An audited batch stays the active sprint for its ENTIRE fix-and-reverify cycle: from the
+moment findings are promoted into it, through every /advance wave that fixes them, until a
+later "/audit batch [BATCH_NUM]" run on it returns PASS. Only then is the cycle closed. This
+step establishes that gate; the matching close-out logic lives in the PASS path below.
+
+Read the "## Batch [BATCH_NUM]" header line in TASKS_PATH. BATCH_OLD_TAG = its current
+bracketed tag, verbatim (or "no tag" if none).
+
+If BATCH_OLD_TAG is already exactly `[CURRENT SPRINT]`:
+  BATCH_WAS_REOPENED = false — it's already the active sprint, nothing to take over.
+Else:
+  BATCH_WAS_REOPENED = true.
+  Search TASKS_PATH for any OTHER "## Batch [M]" header whose bracketed tag is exactly
+  `[CURRENT SPRINT]`. If found:
+    PAUSED_BATCH_NUM = M. PAUSED_BATCH_OLD_TAG = that header's tag (will always be
+    `[CURRENT SPRINT]` by definition of the search, but capture it for symmetry/clarity).
+    Replace batch M's tag with `[PAUSED — resumes when Batch [BATCH_NUM]'s remediation gate closes]`.
+  Replace Batch [BATCH_NUM]'s tag with `[CURRENT SPRINT]` (the plain, exact tag — /advance
+  matches this string literally; never append extra text inside these specific brackets).
+
+Insert or refresh a metadata comment line immediately below the "## Batch [BATCH_NUM]" header
+(delete any pre-existing one first, so re-audits don't stack duplicate gates):
+```
+<!-- BATCH_REMEDIATION_GATE: batch=[BATCH_NUM]; paused_batch=[PAUSED_BATCH_NUM or "none"]; paused_batch_old_tag="[PAUSED_BATCH_OLD_TAG or ""]" -->
+```
+This comment is invisible in rendered markdown and carries no meaning to /advance or /tasks —
+it exists purely so a later "/audit batch [BATCH_NUM]" PASS can find and close this gate,
+restoring whatever sprint it interrupted.
+── End sprint-takeover step ──
+
 If `MODE = "orchestrated"`:
   Print (even if N_PROMOTED = 0 — Max must see the dedup count):
   ```
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     AUDIT → BATCH [BATCH_NUM]: [N_PROMOTED] tasks added, [N_SKIPPED] skipped (already tracked)
+  [If BATCH_WAS_REOPENED: "  ⚠ Batch [BATCH_NUM] (was tagged [BATCH_OLD_TAG]) is now
+    [CURRENT SPRINT] — it stays the active sprint through the full fix cycle, until a
+    re-audit of this batch passes."]
+  [If BATCH_WAS_REOPENED and PAUSED_BATCH_NUM is set: "  ⏸ Batch [PAUSED_BATCH_NUM] was
+    [CURRENT SPRINT] — paused, resumes automatically when Batch [BATCH_NUM]'s remediation gate closes."]
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   [For each task in PROMOTED_TASKS:]
     #[num] [priority] sev [severity] — [description] ([file])
@@ -1109,6 +1189,11 @@ If `MODE = "standalone"`:
   ```
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     AUDIT FINDINGS → BATCH [BATCH_NUM]
+  [If BATCH_WAS_REOPENED: "  ⚠ Batch [BATCH_NUM] (was tagged [BATCH_OLD_TAG]) is now
+    [CURRENT SPRINT] — it stays the active sprint through the full fix cycle, until a
+    re-audit of this batch passes."]
+  [If BATCH_WAS_REOPENED and PAUSED_BATCH_NUM is set: "  ⏸ Batch [PAUSED_BATCH_NUM] was
+    [CURRENT SPRINT] — paused, resumes automatically when Batch [BATCH_NUM]'s remediation gate closes."]
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     [N_PROMOTED] findings promoted as new tasks:
@@ -1117,27 +1202,98 @@ If `MODE = "standalone"`:
     [N_SKIPPED] already tracked as open tasks (skipped)
 
     Run /advance now?
-      yes           — start next wave (new tasks already in batch)
-      review first  — print the new task blocks, then ask again
-      no            — tasks are saved, run /advance when ready
+      yes            — start next wave (new tasks already in batch)
+      review first   — print the new task blocks, then ask again
+      no             — tasks are saved, run /advance when ready[If AUDITED_BATCH_NUM is set:]
+      accept as debt — stop fixing this batch; log its open audit findings as accepted debt
+                       and close the batch remediation cycle now (see ACCEPT-AS-DEBT below)
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   ```
 
   Wait for Max input.
   Affirmatives: yes / y / yeah / go / proceed
   Negatives: no / n / not yet / later
-  If input doesn't match any of the above: re-prompt ONCE: "Unrecognized response. Run /advance now? [yes / no]"
+  Debt: accept as debt / accept debt / accept / debt
+  If input doesn't match any of the above: re-prompt ONCE: "Unrecognized response. Run /advance now? [yes / no / accept as debt]"
   If STILL unrecognized: default to no (safe default). Do not loop again.
 
   If "review first": print each newly-added task block in full from TASKS_PATH.
-    Re-print: "Run /advance now? [yes / no]". Wait. Apply same affirmative/negative logic above.
+    Re-print: "Run /advance now? [yes / no / accept as debt]". Wait. Apply same logic above.
   If affirmative: run /advance. Stop.
   If negative: print "Tasks are in Batch [BATCH_NUM]. Run /advance when ready." Stop.
+  If "accept as debt": run the ACCEPT-AS-DEBT procedure below. Stop.
 
   If N_PROMOTED = 0:
     Print: "All [findings_count] findings already tracked as open tasks — nothing new added."
-    Ask: "Run /advance to continue fixing them? [yes / no]"
-    Wait. Apply same affirmative/negative/unrecognized logic. Stop.
+    Ask: "Run /advance to continue fixing them? [yes / no[If AUDITED_BATCH_NUM is set: / accept as debt]]"
+    Wait. Apply same affirmative/negative/debt/unrecognized logic. Stop.
+
+── ACCEPT-AS-DEBT — close a batch remediation gate without a clean re-audit ──
+
+A batch under a batch remediation gate (see the sprint-takeover step above) only closes
+automatically on a later PASS. Not every batch converges to a clean PASS — sometimes what's
+left after a few /advance waves is judged acceptable, and the right move is to log it as debt
+and get back to whatever the team was actually supposed to be doing. This is always Max's
+decision — never selected automatically, never the default option in any banner, and never
+triggered just because a batch has been "current sprint" for a while.
+
+Available whenever AUDITED_BATCH_NUM is set (offered from the FAIL-path banner above, the
+MAX_CYCLES banner, and the PASS-path "batch still has open tasks" case below).
+
+When Max selects "accept as debt":
+
+1. Find every task block within the "## Batch [BATCH_NUM]" section that does NOT contain
+   "**Status: COMPLETE" — regardless of source. The gate is shared with `/worldclass`'s
+   batch mode (both tools open and close the same `BATCH_REMEDIATION_GATE`), so a batch's
+   open tasks may carry `**Source:** Audit finding` or `**Source:** WorldClass deduction` —
+   accept-as-debt closes the batch either way, not just the findings from this specific tool.
+   (This also includes anything left over from an earlier wave — the batch may carry unfixed
+   tasks from a prior /audit or /worldclass run too.)
+
+   For each such task:
+   - Append a row to `.autocode/debt.md` (create with the standard header if it doesn't exist):
+     `| [today's date] | Batch [BATCH_NUM] remediation (accepted) | [category — parse
+     from the task's **Source:** line] | [the task's **What:** text, first 200 chars] |
+     [severity — parse from the task's **Source:** line] | [Direct/Full — copy the task's
+     existing **Complexity:** label verbatim] | Accepted as debt — Max closed Batch
+     [BATCH_NUM]'s remediation cycle without a clean re-audit/re-score, [today's date] |`
+   - Rewrite that task's `**Status:**` line to:
+     `**Status:** COMPLETE — [today's date] (accepted as debt, see debt.md)`
+     (This is what lets the batch actually close — a batch with open tasks can't be marked
+     complete, accepted-debt or otherwise; logging to debt.md is what makes them no longer
+     "open" for this purpose.)
+
+2. Look for an `<!-- BATCH_REMEDIATION_GATE: batch=[BATCH_NUM]; ... -->` comment below the
+   "## Batch [BATCH_NUM]" header. Parse `paused_batch` / `paused_batch_old_tag` from it, then
+   remove the comment line.
+
+3. Rewrite the "## Batch [BATCH_NUM]" header's tag to:
+   `[COMPLETE — [today's date] — [N] finding(s) accepted as debt]`
+
+4. If `paused_batch` was not "none": find "## Batch [paused_batch]" and, if its tag is still
+   `[PAUSED — resumes when Batch [BATCH_NUM]'s remediation gate closes]`, restore it to
+   `paused_batch_old_tag` verbatim — this is how the interrupted sprint resumes.
+
+5. Print:
+   ```
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+     BATCH [BATCH_NUM] — BATCH REMEDIATION CLOSED AS ACCEPTED DEBT
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+     [N] finding(s) logged to debt.md and marked COMPLETE (not fixed — accepted):
+   [For each: "  severity [N] | [category] | [one-line description]"]
+
+     Batch [BATCH_NUM] is now [COMPLETE — accepted debt].
+   [If a batch was restored: "  Batch [paused_batch] resumes as [CURRENT SPRINT]."]
+   [If no batch was restored AND no other batch currently carries [CURRENT SPRINT]: "  No
+     batch currently holds [CURRENT SPRINT] — run /meet or retag one manually before the
+     next /advance."]
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   ```
+
+Do not run /advance, /worldclass, or /reflect after this — the cycle is being deliberately
+ended, not continued. Stop.
+
+── End ACCEPT-AS-DEBT ──
 
 **If NAIVE_GATE_FAIL = true AND verdict = PASS:**
 Override verdict to FAIL. Prepend to FINDINGS_JSON:
@@ -1181,11 +1337,47 @@ Resolve TASKS_PATH:
 BATCH_NUM = 1
 OPEN_AUDIT_TASK_COUNT = 0
 If TASKS_PATH exists:
-  BATCH_NUM = highest integer N in any "## Batch [N]" header in TASKS_PATH (default 1 if none found)
+  If AUDITED_BATCH_NUM is set AND a "## Batch [AUDITED_BATCH_NUM]" header exists in TASKS_PATH:
+    BATCH_NUM = AUDITED_BATCH_NUM
+  Else:
+    BATCH_NUM = highest integer N in any "## Batch [N]" header in TASKS_PATH (default 1 if none found)
   For each task block in TASKS_PATH that:
     (a) does NOT contain "**Status: COMPLETE" AND
     (b) has a "**Source:**" line containing "Audit finding":
       OPEN_AUDIT_TASK_COUNT += 1
+
+── Close the batch remediation gate, if this batch was under one ──
+Only meaningful when AUDITED_BATCH_NUM is set (this was a batch-scoped audit, e.g.
+"/audit batch 12") — a PASS on a task/feature/file-path audit doesn't touch any batch header.
+
+GATE_CLOSED = false
+RESTORED_BATCH_NUM = null
+
+If TASKS_PATH exists AND BATCH_NUM = AUDITED_BATCH_NUM:
+  Look for an `<!-- BATCH_REMEDIATION_GATE: batch=[BATCH_NUM]; ... -->` comment directly below
+  the "## Batch [BATCH_NUM]" header.
+  If found:
+    Parse `paused_batch` and `paused_batch_old_tag` from the comment.
+    BATCH_OPEN_COUNT = count of task blocks WITHIN this batch's section only (not the whole
+    file) that do NOT contain "**Status: COMPLETE".
+
+    If BATCH_OPEN_COUNT = 0:
+      This fix-and-reverify cycle is done. Remove the BATCH_REMEDIATION_GATE comment line.
+      Rewrite the "## Batch [BATCH_NUM]" header's tag from `[CURRENT SPRINT]` to
+      `[COMPLETE — [today's date]]`.
+      GATE_CLOSED = true.
+      If `paused_batch` is not "none":
+        RESTORED_BATCH_NUM = paused_batch.
+        Find "## Batch [RESTORED_BATCH_NUM]" header. If its tag is currently
+        `[PAUSED — resumes when Batch [BATCH_NUM]'s remediation gate closes]`: restore it to
+        `paused_batch_old_tag` verbatim (this is how the interrupted sprint resumes automatically).
+    Else:
+      The cycle is NOT done — real code passed the audit, but bookkeeping in tasks.md still
+      shows open tasks in this batch. Do NOT close the gate or touch the tag: leave the batch
+      as `[CURRENT SPRINT]` and leave the BATCH_REMEDIATION_GATE comment in place. This is
+      reported to Max below so the remaining tasks can be marked COMPLETE or the batch
+      re-audited again once they are.
+── End gate-close step ──
 
 If `MODE = "standalone"`:
   If OPEN_AUDIT_TASK_COUNT > 0:
@@ -1193,6 +1385,18 @@ If `MODE = "standalone"`:
     Batch [BATCH_NUM] — verify they were fixed and mark COMPLETE, or let /advance close them.`
   Else:
     print `✅ Audit passed. No outstanding audit tasks.`
+  If GATE_CLOSED:
+    print `🏁 Batch remediation cycle for Batch [BATCH_NUM] is closed — marked
+    [COMPLETE — [today's date]].`
+    If RESTORED_BATCH_NUM is set:
+      print `▶ Batch [RESTORED_BATCH_NUM] resumes as [CURRENT SPRINT] (restored from its
+      pre-remediation tag).`
+  Else if AUDITED_BATCH_NUM is set AND BATCH_OPEN_COUNT is not null AND BATCH_OPEN_COUNT > 0:
+    print `⏳ Batch [BATCH_NUM] still has [BATCH_OPEN_COUNT] open task(s) — it remains
+    [CURRENT SPRINT] until those close, even though this audit passed.`
+    Ask: "Accept the remaining open task(s) as debt and close this batch now? [yes / no]"
+    Wait. If yes: run the ACCEPT-AS-DEBT procedure (find above). Stop.
+    If no: proceed to /worldclass as normal — batch stays open.
   Run `/worldclass $ARGUMENTS`.
 
 If `MODE = "orchestrated"`:
@@ -1214,6 +1418,12 @@ Print:
 Outstanding issues:
 [list them]
 ```
+
+If `MODE = "standalone"` AND `AUDITED_BATCH_NUM` is set AND Batch [AUDITED_BATCH_NUM] currently
+carries an `<!-- BATCH_REMEDIATION_GATE -->` comment (from an earlier FAIL run on this same
+batch): print `"This batch's remediation cycle is still open. Accept remaining findings
+as debt and close it? [yes / no]"`. If yes: run the ACCEPT-AS-DEBT procedure above (using this
+run's findings the same way a FAIL run would). Stop. If no: proceed as below.
 
 If `MODE = "standalone"`: run `/reflect $ARGUMENTS`. Then proceed to POST-AUDIT REORDER below.
 If `MODE = "orchestrated"`: stop here. /task handles escalation.

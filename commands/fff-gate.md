@@ -97,13 +97,15 @@ engineer you know, what would they criticize? Be specific — file:line,
 not a general impression.
 
 FFF-3 (User vs Reader): Is this code built for the person who USES it or
-the person who READS it? Name any place naming, structure, or comments
-favor one over the other at the expense of clarity or correctness.
+the person who READS it? Name any place naming or structure favors one
+over the other at the expense of clarity or correctness. Do not report
+comment wording (nit; see the Comment rule in docs/ARCHITECTURE.md).
 
 FFF-4 (Does It Do What It Claims): Pick the 2 most consequential functions
-or branches changed in this diff. Does each one actually do what its name/
-docstring/comment claims, with no hidden side effects or silent failure
-paths? Cite file:line for each.
+or branches changed in this diff. Does each one actually do what its name
+and its tests say it does, with no hidden side effects or silent failure
+paths? Cite file:line for each. Judge behavior, not comment text. Report a
+comment only if it makes a security or money claim that no test pins.
 
 FFF-5 (10-Year Durability): If this diff shipped unchanged and ran for 10
 years, what's the first thing that would break, drift, or become a trap
