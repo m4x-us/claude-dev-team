@@ -113,6 +113,15 @@ social      packages/ordinatio-social
 
 domus       packages/ordinatio-domus
 
+vendor      apps/web/src/lib/gocreate
+            apps/web/src/lib/garments
+            apps/web/src/lib/fabric
+            apps/web/src/lib/fit-profile
+            apps/web/src/app/api/garments
+            apps/worker/src/api/gocreate-client.ts
+            apps/worker/src/utils/gocreate-status-map.ts
+            packages/shared/src/gocreate
+
 realtime    packages/ordinatio-realtime
             apps/web/src/app/api/realtime
             # packages/ordinatio-realtime: alfred owns edits (Batch 2 —

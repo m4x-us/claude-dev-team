@@ -48,8 +48,41 @@ fi
 # hook itself — always take the FULL review tier. They are enforcement
 # infrastructure: an unreviewed edit there silently disables gates for every
 # later commit, so they can never ride the DIRECT (or NONE) path.
+#
+# apps/web/scripts/check-cms-preset-write-gate.ts (Task #122 rebuild,
+# 2026-10-08) is ALSO enforcement infrastructure — the real AST logic
+# behind scripts/cms-preset-write-gate.sh's thin wrapper — but lives
+# outside scripts/, so the pattern above would miss it on its own if
+# edited alone. Added here explicitly, by exact path (not a wildcard —
+# see this gate's own Rule-24 discipline about not re-growing a stale
+# hand-maintained list).
+#
+# apps/web/scripts/lib/ts-parse.ts is ALSO added here — a post-rebuild
+# independent review found this gap live (a one-line edit to it alone
+# classified DIRECT, not FULL) and it is arguably MORE load-bearing than
+# the checker file above: it's the SHARED fail-closed parse-diagnostics
+# module BOTH check-cms-preset-write-gate.ts and check-agent-tool-routes.ts
+# depend on for their entire "a file that fails to parse is a violation,
+# never a silent pass" guarantee — that file's own header already warns a
+# broken `parseDiagnostics` lookup would let a real broken commit through
+# while only the fixture suite goes red.
+#
+# apps/web/scripts/lib/cms-preset-ast.ts (round-4 split, 2026-10-08) holds
+# the checker's entire AST semantic-analysis logic (expand/literalNamesOf/
+# receiversOf/modelsOf/collectAliases) — extracted once the checker file
+# crossed ~500 lines. Added here for the identical reason as the checker
+# file itself: this is where a future "one more wrapper kind" fix would
+# actually land, and it must never silently classify as DIRECT-tier.
+#
+# DISCLOSED, NOT FIXED HERE: apps/web/scripts/check-agent-tool-routes.ts
+# itself, and its other lib/ files (route-tree.ts, tool-catalog.ts,
+# route-verbs.ts), have this identical latent gap today — confirmed via
+# the same grep this comment is describing — and are deliberately left
+# alone, out of this task's scope; a future pass should close all of
+# these together rather than let each one-off addition become its own
+# stale list.
 # MUST match the pathspec list in scripts/staged-diff-hash.sh (see note there).
-HARNESS_FILES=$(echo "$STAGED" | grep -E '^\.claude/commands/.*\.md$|^scripts/.*\.sh$|^\.husky/' || true)
+HARNESS_FILES=$(echo "$STAGED" | grep -E '^\.claude/commands/.*\.md$|^scripts/.*\.sh$|^\.husky/|^apps/web/scripts/check-cms-preset-write-gate\.ts$|^apps/web/scripts/lib/ts-parse\.ts$|^apps/web/scripts/lib/cms-preset-ast\.ts$' || true)
 if [ -n "$HARNESS_FILES" ]; then
   echo "FULL"
   echo "Harness file staged: $(echo "$HARNESS_FILES" | head -1) — command prose and gate scripts always take the full review tier."
@@ -72,12 +105,18 @@ FILE_COUNT=$(echo "$SOURCE_FILES" | grep -c . || true)
 # of file count.
 SENSITIVE_MATCH=$(echo "$SOURCE_FILES" | grep -iE '(^|/)(auth|security|payment|stripe|refund|password|credential|permission|scheduling-auth|role)([-./]|$)' || true)
 
-# CMS API routes are a multi-tenant boundary where organizationId row-scoping
-# is the ONLY isolation (all orgs share one physical DB). The keyword regex
+# API routes are a multi-tenant boundary where organizationId row-scoping is
+# the ONLY isolation (all orgs share one physical DB). The keyword regex
 # above does not catch them by path, so the CMS-5 slots IDOR diff classified
-# DIRECT and got only a lightweight FFF pass (W1C finding). Any api/cms route
-# change is FULL-tier — the exact class this classifier exists to escalate.
-CMS_API_MATCH=$(echo "$SOURCE_FILES" | grep -E '^apps/web/src/app/api/cms/.*route\.(ts|tsx)$' || true)
+# DIRECT and got only a lightweight FFF pass (W1C finding). Originally scoped
+# to api/cms/ only; GENERALIZED (2026-08-17, Rule 24 "Gate Completeness") to
+# ALL of api/ — scripts/cms-org-scoping-gate.sh's own scan roots widened the
+# same day for the identical reason (a real severity-9 marketingBrandGuide
+# bug in marketing/war-room code, invisible to the old cms-only surface —
+# see that script's header). Any api/ route change (any namespace, not just
+# cms) is FULL-tier — the exact class this classifier exists to escalate,
+# now matching the gate it exists to pair with.
+CMS_API_MATCH=$(echo "$SOURCE_FILES" | grep -E '^apps/web/src/app/api/.*route\.(ts|tsx)$' || true)
 
 PACKAGE_MATCH=$(echo "$SOURCE_FILES" | grep -E '^packages/' || true)
 
@@ -89,7 +128,7 @@ fi
 
 if [ -n "$CMS_API_MATCH" ]; then
   echo "FULL"
-  echo "CMS API route staged (multi-tenant boundary — see CMS-5): $(echo "$CMS_API_MATCH" | head -1)"
+  echo "API route staged (multi-tenant boundary — see CMS-5 / Rule 24): $(echo "$CMS_API_MATCH" | head -1)"
   exit 0
 fi
 
